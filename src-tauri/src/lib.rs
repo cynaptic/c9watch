@@ -8,6 +8,10 @@ use session::{
     extract_messages, parse_last_n_entries, parse_sessions_index, MessageType,
 };
 use serde::Serialize;
+use tauri::{
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Manager,
+};
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -119,6 +123,33 @@ pub fn run() {
         .setup(|app| {
             // Start the polling loop when the app starts
             start_polling(app.handle().clone());
+
+            // Create the tray icon with click handler
+            let app_handle = app.handle().clone();
+            TrayIconBuilder::new()
+                .icon(app.default_window_icon().unwrap().clone())
+                .icon_as_template(true)
+                .tooltip("Claude Session Monitor")
+                .on_tray_icon_event(move |_tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        // Toggle window visibility on left click
+                        if let Some(window) = app_handle.get_webview_window("main") {
+                            if window.is_visible().unwrap_or(false) {
+                                let _ = window.hide();
+                            } else {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                    }
+                })
+                .build(app)?;
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
