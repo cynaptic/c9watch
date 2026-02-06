@@ -4,9 +4,7 @@ pub mod session;
 
 use actions::{open_session as open_session_action, send_prompt as send_prompt_action, stop_session as stop_session_action};
 use polling::{start_polling, Session};
-use session::{
-    extract_messages, parse_last_n_entries, parse_sessions_index, MessageType,
-};
+use session::{extract_messages, parse_last_n_entries, MessageType};
 use serde::Serialize;
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -33,55 +31,41 @@ async fn get_conversation(session_id: String) -> Result<Conversation, String> {
     let home_dir = dirs::home_dir().ok_or("Failed to get home directory")?;
     let claude_projects_dir = home_dir.join(".claude").join("projects");
 
-    // Enumerate all project directories
+    // Fast path: search for the JSONL file directly across all project directories
     let entries = std::fs::read_dir(&claude_projects_dir)
         .map_err(|e| format!("Failed to read projects directory: {}", e))?;
 
-    // Find the project containing this session
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
-        let project_path = entry.path();
+    let session_filename = format!("{}.jsonl", session_id);
 
+    for entry in entries.flatten() {
+        let project_path = entry.path();
         if !project_path.is_dir() {
             continue;
         }
 
-        // Check if this project contains our session
-        let index_path = project_path.join("sessions-index.json");
-        if let Ok(sessions_index) = parse_sessions_index(&index_path) {
-            let has_session = sessions_index
-                .entries
-                .iter()
-                .any(|e| e.session_id == session_id);
+        // Check if this project contains the session file directly
+        let session_file = project_path.join(&session_filename);
+        if session_file.exists() {
+            // Found it - parse the session file (limit to last 50 entries for speed)
+            let entries = parse_last_n_entries(&session_file, 50)
+                .map_err(|e| format!("Failed to parse session file: {}", e))?;
 
-            if has_session {
-                // Found the project - parse the session file
-                let session_file = project_path.join(format!("{}.jsonl", session_id));
+            let messages = extract_messages(&entries);
 
-                if !session_file.exists() {
-                    return Err(format!("Session file does not exist: {:?}", session_file));
-                }
+            // Convert to frontend format
+            let conversation_messages: Vec<ConversationMessage> = messages
+                .into_iter()
+                .map(|(timestamp, msg_type, content)| ConversationMessage {
+                    timestamp,
+                    message_type: msg_type,
+                    content,
+                })
+                .collect();
 
-                let entries = parse_last_n_entries(&session_file, 100)
-                    .map_err(|e| format!("Failed to parse session file: {}", e))?;
-
-                let messages = extract_messages(&entries);
-
-                // Convert to frontend format
-                let conversation_messages: Vec<ConversationMessage> = messages
-                    .into_iter()
-                    .map(|(timestamp, msg_type, content)| ConversationMessage {
-                        timestamp,
-                        message_type: msg_type,
-                        content,
-                    })
-                    .collect();
-
-                return Ok(Conversation {
-                    session_id,
-                    messages: conversation_messages,
-                });
-            }
+            return Ok(Conversation {
+                session_id,
+                messages: conversation_messages,
+            });
         }
     }
 
