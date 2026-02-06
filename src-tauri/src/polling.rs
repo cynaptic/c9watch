@@ -1,7 +1,11 @@
 use crate::session::{
     determine_status, parse_last_n_entries, parse_sessions_index, SessionDetector, SessionStatus,
 };
+use chrono::{DateTime, Utc};
 use serde::Serialize;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use std::path::Path;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -104,11 +108,23 @@ pub fn detect_and_enrich_sessions() -> Result<Vec<Session>, String> {
                 Some(entry.git_branch.clone()),
             ),
             None => {
-                eprintln!(
-                    "Session {} not found in sessions-index.json",
-                    session_id
-                );
-                continue;
+                // Session not in index yet (still running) - use fallback values
+                // Try to get first prompt from JSONL file
+                let session_file_path = detected.project_path.join(format!("{}.jsonl", session_id));
+                let first_prompt = get_first_prompt_from_jsonl(&session_file_path)
+                    .unwrap_or_else(|| "(Active session)".to_string());
+
+                // Get file modification time
+                let modified = std::fs::metadata(&session_file_path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .map(|t| {
+                        let datetime: DateTime<Utc> = t.into();
+                        datetime.to_rfc3339()
+                    })
+                    .unwrap_or_default();
+
+                (first_prompt, 0, modified, None)
             }
         };
 
@@ -139,6 +155,51 @@ pub fn detect_and_enrich_sessions() -> Result<Vec<Session>, String> {
     }
 
     Ok(sessions)
+}
+
+/// Extract the first user prompt from a session JSONL file
+fn get_first_prompt_from_jsonl(path: &Path) -> Option<String> {
+    let file = File::open(path).ok()?;
+    let reader = BufReader::new(file);
+
+    for line in reader.lines().take(50) {
+        if let Ok(line) = line {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
+                // Check if this is a user message
+                if value.get("type").and_then(|t| t.as_str()) == Some("user") {
+                    // Try to get the message content
+                    if let Some(message) = value.get("message") {
+                        if let Some(content) = message.get("content") {
+                            // Content can be a string or array
+                            if let Some(text) = content.as_str() {
+                                return Some(truncate_string(text, 100));
+                            } else if let Some(arr) = content.as_array() {
+                                // Find the first text block
+                                for item in arr {
+                                    if item.get("type").and_then(|t| t.as_str()) == Some("text") {
+                                        if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+                                            return Some(truncate_string(text, 100));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Truncate a string to a maximum length
+fn truncate_string(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max_len])
+    }
 }
 
 #[cfg(test)]
