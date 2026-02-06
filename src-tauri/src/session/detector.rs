@@ -78,68 +78,80 @@ impl SessionDetector {
         Ok(sessions)
     }
 
-    /// Find sessions that are likely active based on recent modification
+    /// Find sessions that are likely active based on running process count
     fn find_active_sessions(
         &self,
         processes: &[ClaudeProcess],
         project_dirs: &[PathBuf],
     ) -> Vec<DetectedSession> {
-        let mut sessions = Vec::new();
-        let now = std::time::SystemTime::now();
-        let thirty_mins_ago = now - std::time::Duration::from_secs(30 * 60);
+        // Collect all session files with their modification times
+        let mut session_files: Vec<(std::time::SystemTime, PathBuf, PathBuf)> = Vec::new();
 
         for project_dir in project_dirs {
-            // First, find all JSONL files in the project directory that were recently modified
-            // This catches sessions that aren't in the index yet (currently running)
             if let Ok(entries) = fs::read_dir(project_dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
 
-                    // Check if it's a JSONL file (not in subagents directory)
+                    // Check if it's a JSONL file (UUID format, not subagent files)
                     if path.is_file()
                         && path.extension().map_or(false, |ext| ext == "jsonl")
                     {
+                        // Skip files that don't look like UUIDs (e.g., agent-*.jsonl)
+                        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                            if stem.starts_with("agent-") {
+                                continue;
+                            }
+                        }
+
                         if let Ok(metadata) = fs::metadata(&path) {
                             if let Ok(modified) = metadata.modified() {
-                                if modified > thirty_mins_ago {
-                                    // Extract session ID from filename
-                                    if let Some(session_id) = path.file_stem()
-                                        .and_then(|s| s.to_str())
-                                        .map(|s| s.to_string())
-                                    {
-                                        // Try to get project info from sessions-index.json
-                                        let (project_path, project_name) = self
-                                            .get_project_info_from_index(project_dir, &session_id)
-                                            .unwrap_or_else(|| {
-                                                // Fallback: derive from project directory name
-                                                let name = project_dir
-                                                    .file_name()
-                                                    .and_then(|n| n.to_str())
-                                                    .unwrap_or("unknown")
-                                                    .to_string();
-                                                (project_dir.clone(), name)
-                                            });
-
-                                        // Assign a process (round-robin if multiple)
-                                        let pid = if !processes.is_empty() {
-                                            processes[sessions.len() % processes.len()].pid
-                                        } else {
-                                            0
-                                        };
-
-                                        sessions.push(DetectedSession {
-                                            pid,
-                                            cwd: project_path.clone(),
-                                            project_path: project_dir.clone(),
-                                            session_id: Some(session_id),
-                                            project_name,
-                                        });
-                                    }
-                                }
+                                session_files.push((modified, path, project_dir.clone()));
                             }
                         }
                     }
                 }
+            }
+        }
+
+        // Sort by modification time (most recent first)
+        session_files.sort_by(|a, b| b.0.cmp(&a.0));
+
+        // Take only as many sessions as there are running processes
+        let num_to_take = processes.len().max(1);
+        let mut sessions = Vec::new();
+
+        for (_, path, project_dir) in session_files.into_iter().take(num_to_take) {
+            if let Some(session_id) = path.file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+            {
+                // Try to get project info from sessions-index.json
+                let (project_path, project_name) = self
+                    .get_project_info_from_index(&project_dir, &session_id)
+                    .unwrap_or_else(|| {
+                        // Fallback: derive from project directory name
+                        let name = project_dir
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        (project_dir.clone(), name)
+                    });
+
+                // Assign a process (round-robin if multiple)
+                let pid = if !processes.is_empty() {
+                    processes[sessions.len() % processes.len()].pid
+                } else {
+                    0
+                };
+
+                sessions.push(DetectedSession {
+                    pid,
+                    cwd: project_path.clone(),
+                    project_path: project_dir.clone(),
+                    session_id: Some(session_id),
+                    project_name,
+                });
             }
         }
 
