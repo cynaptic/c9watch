@@ -1,10 +1,14 @@
+pub mod custom_names;
 pub mod detector;
 pub mod parser;
+pub mod permissions;
 pub mod status;
 
+pub use custom_names::CustomNames;
 pub use detector::{DetectedSession, SessionDetector};
 pub use parser::{
     extract_messages, parse_last_n_entries, parse_sessions_index, MessageContent, MessageType,
     SessionEntry, SessionIndexEntry, SessionsIndex,
 };
+pub use permissions::PermissionChecker;
 pub use status::{determine_status, determine_status_with_context, SessionStatus};

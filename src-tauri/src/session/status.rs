@@ -1,5 +1,15 @@
 use serde::{Deserialize, Serialize};
+use chrono::{DateTime, Utc};
+use std::sync::OnceLock;
 use super::parser::{SessionEntry, MessageContent, AssistantMessage};
+use super::permissions::PermissionChecker;
+
+/// Global permission checker (loaded once from settings)
+static PERMISSION_CHECKER: OnceLock<PermissionChecker> = OnceLock::new();
+
+fn get_permission_checker() -> &'static PermissionChecker {
+    PERMISSION_CHECKER.get_or_init(PermissionChecker::from_settings_file)
+}
 
 /// Represents the current status of a Claude Code session
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -39,14 +49,46 @@ pub fn determine_status(entries: &[SessionEntry]) -> SessionStatus {
             // User just sent a message, Claude should be responding
             SessionStatus::Working
         }
-        SessionEntry::Assistant { message, .. } => {
-            analyze_assistant_message(message)
+        SessionEntry::Assistant { base, message } => {
+            // Get the raw status from analyzing the message
+            // This now uses PermissionChecker to determine if tools need permission
+            let raw_status = analyze_assistant_message(message);
+
+            // If status is Working (auto-approved tools running), apply a brief
+            // grace period in case the tool completes very quickly
+            if raw_status == SessionStatus::Working {
+                // Check if there are pending tool uses
+                let has_pending_tools = has_pending_tool_uses(&message.content);
+                if has_pending_tools && !is_entry_recent(&base.timestamp, 2) {
+                    // Auto-approved tool running for > 2 seconds - still Working
+                    // (this is normal for slower operations like file reads)
+                    SessionStatus::Working
+                } else {
+                    raw_status
+                }
+            } else {
+                // NeedsPermission, WaitingForInput, etc. - return immediately
+                // No delay for permission prompts!
+                raw_status
+            }
         }
         _ => {
             // For file history snapshots, summaries, or unknown entries,
             // default to waiting for input
             SessionStatus::WaitingForInput
         }
+    }
+}
+
+/// Checks if a timestamp is within the last N seconds
+fn is_entry_recent(timestamp: &str, seconds: i64) -> bool {
+    if let Ok(entry_time) = DateTime::parse_from_rfc3339(timestamp) {
+        let now = Utc::now();
+        let age = now.signed_duration_since(entry_time.with_timezone(&Utc));
+        age.num_seconds() < seconds
+    } else {
+        // If we can't parse the timestamp, assume it's not recent
+        false
     }
 }
 
@@ -74,8 +116,15 @@ fn analyze_assistant_message(message: &AssistantMessage) -> SessionStatus {
                 _ => SessionStatus::WaitingForInput,
             }
         } else {
-            // Tool use present but not all completed - needs permission
-            SessionStatus::NeedsPermission
+            // Tool use present but not all completed
+            // Check if pending tools are auto-approved
+            if are_pending_tools_auto_approved(&message.content) {
+                // All pending tools will be auto-approved, so status is Working
+                SessionStatus::Working
+            } else {
+                // At least one pending tool needs user permission
+                SessionStatus::NeedsPermission
+            }
         }
     } else {
         // No tool use, just text/thinking content
@@ -89,6 +138,47 @@ fn analyze_assistant_message(message: &AssistantMessage) -> SessionStatus {
             _ => SessionStatus::WaitingForInput,
         }
     }
+}
+
+/// Checks if all pending (incomplete) tool uses are auto-approved
+fn are_pending_tools_auto_approved(content: &[MessageContent]) -> bool {
+    let checker = get_permission_checker();
+
+    // Get IDs of tools that have results
+    let completed_ids: Vec<&str> = content
+        .iter()
+        .filter_map(|c| {
+            if let MessageContent::ToolResult { tool_use_id, .. } = c {
+                Some(tool_use_id.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Check each tool use - if it's pending (no result), check if auto-approved
+    for item in content {
+        if let MessageContent::ToolUse { id, name, input } = item {
+            // Skip if already completed
+            if completed_ids.contains(&id.as_str()) {
+                continue;
+            }
+
+            // This tool is pending - check if it's auto-approved
+            if !checker.is_auto_approved(name, input) {
+                // Found a tool that needs permission
+                return false;
+            }
+        }
+    }
+
+    // All pending tools are auto-approved
+    true
+}
+
+/// Checks if there are any pending (incomplete) tool uses
+fn has_pending_tool_uses(content: &[MessageContent]) -> bool {
+    !check_all_tools_completed(content)
 }
 
 /// Checks if all tool uses in the content have corresponding tool results
@@ -253,7 +343,8 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_use_pending() {
+    fn test_tool_use_pending_auto_approved() {
+        // Read is auto-approved, so pending Read should be Working
         let entries = vec![
             SessionEntry::Assistant {
                 base: create_base(),
@@ -266,6 +357,32 @@ mod tests {
                             id: "toolu_123".to_string(),
                             name: "Read".to_string(),
                             input: serde_json::json!({"file_path": "/test/file.txt"}),
+                        }
+                    ],
+                    stop_reason: Some("tool_use".to_string()),
+                    stop_sequence: None,
+                    usage: None,
+                },
+            }
+        ];
+        assert_eq!(determine_status(&entries), SessionStatus::Working);
+    }
+
+    #[test]
+    fn test_tool_use_pending_needs_permission() {
+        // Bash with unknown command needs permission
+        let entries = vec![
+            SessionEntry::Assistant {
+                base: create_base(),
+                message: AssistantMessage {
+                    model: "claude-opus-4-5-20251101".to_string(),
+                    id: "msg_test".to_string(),
+                    role: "assistant".to_string(),
+                    content: vec![
+                        MessageContent::ToolUse {
+                            id: "toolu_123".to_string(),
+                            name: "Bash".to_string(),
+                            input: serde_json::json!({"command": "rm -rf /some/path"}),
                         }
                     ],
                     stop_reason: Some("tool_use".to_string()),
@@ -308,7 +425,8 @@ mod tests {
     }
 
     #[test]
-    fn test_multiple_tools_partially_completed() {
+    fn test_multiple_tools_partially_completed_auto_approved() {
+        // Both tools are Read (auto-approved), so even partial = Working
         let entries = vec![
             SessionEntry::Assistant {
                 base: create_base(),
@@ -326,6 +444,42 @@ mod tests {
                             id: "toolu_456".to_string(),
                             name: "Read".to_string(),
                             input: serde_json::json!({"file_path": "/test/file2.txt"}),
+                        },
+                        MessageContent::ToolResult {
+                            tool_use_id: "toolu_123".to_string(),
+                            content: "File 1 content".to_string(),
+                            is_error: Some(false),
+                        }
+                    ],
+                    stop_reason: Some("tool_use".to_string()),
+                    stop_sequence: None,
+                    usage: None,
+                },
+            }
+        ];
+        assert_eq!(determine_status(&entries), SessionStatus::Working);
+    }
+
+    #[test]
+    fn test_multiple_tools_partially_completed_needs_permission() {
+        // One Read (auto) completed, one Bash (needs permission) pending
+        let entries = vec![
+            SessionEntry::Assistant {
+                base: create_base(),
+                message: AssistantMessage {
+                    model: "claude-opus-4-5-20251101".to_string(),
+                    id: "msg_test".to_string(),
+                    role: "assistant".to_string(),
+                    content: vec![
+                        MessageContent::ToolUse {
+                            id: "toolu_123".to_string(),
+                            name: "Read".to_string(),
+                            input: serde_json::json!({"file_path": "/test/file1.txt"}),
+                        },
+                        MessageContent::ToolUse {
+                            id: "toolu_456".to_string(),
+                            name: "Bash".to_string(),
+                            input: serde_json::json!({"command": "make build"}),
                         },
                         MessageContent::ToolResult {
                             tool_use_id: "toolu_123".to_string(),
