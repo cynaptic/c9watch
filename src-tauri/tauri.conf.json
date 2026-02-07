@@ -12,10 +12,15 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Claude Session Monitor",
         "width": 900,
         "height": 600,
-        "visible": false
+        "minWidth": 600,
+        "minHeight": 400,
+        "visible": true,
+        "center": true,
+        "titleBarStyle": "Transparent"
       }
     ],
     "security": {

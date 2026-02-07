@@ -11,7 +11,6 @@ import { SessionStatus } from '../types';
  * Per-session UI state for context preservation
  */
 export interface SessionUIState {
-	scrollPosition: number;
 	draftPrompt: string;
 }
 
@@ -41,7 +40,7 @@ export const sessionUIState = writable<Map<string, SessionUIState>>(new Map());
 export function getSessionUIState(sessionId: string): SessionUIState {
 	const state = get(sessionUIState);
 	if (!state.has(sessionId)) {
-		state.set(sessionId, { scrollPosition: 0, draftPrompt: '' });
+		state.set(sessionId, { draftPrompt: '' });
 		sessionUIState.set(state);
 	}
 	return state.get(sessionId)!;
@@ -52,7 +51,7 @@ export function getSessionUIState(sessionId: string): SessionUIState {
  */
 export function updateSessionUIState(sessionId: string, updates: Partial<SessionUIState>) {
 	sessionUIState.update((state) => {
-		const current = state.get(sessionId) || { scrollPosition: 0, draftPrompt: '' };
+		const current = state.get(sessionId) || { draftPrompt: '' };
 		state.set(sessionId, { ...current, ...updates });
 		return state;
 	});
