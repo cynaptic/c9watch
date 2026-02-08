@@ -4,6 +4,10 @@
 
 **c9watch** (short for **c**laude cod**e** watch, like k8s for Kubernetes) is a macOS desktop app that gives you a real-time dashboard of every Claude Code session running on your machine. No more switching between terminals to check which agent needs permission, which one is working, and which one is idle.
 
+## Demo
+
+https://github.com/minchenlee/c9watch/assets/demo.mp4
+
 ## Works with everything. Tied to nothing.
 
 Unlike other Claude Code management tools that require you to launch sessions from within their app, **c9watch doesn't care where you start your sessions**. It discovers them automatically by scanning running processes at the OS level.
