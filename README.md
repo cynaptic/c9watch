@@ -6,7 +6,7 @@
 
 ## Demo
 
-https://github.com/minchenlee/c9watch/assets/demo.mp4
+<video src="https://github.com/minchenlee/c9watch/releases/download/demo-assets/demo.mp4" controls width="100%"></video>
 
 ## Works with everything. Tied to nothing.
 
