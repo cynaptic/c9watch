@@ -171,28 +171,17 @@ impl SessionDetector {
             let cwd_str = proc_cwd.to_string_lossy();
             let encoded_cwd = cwd_str.replace('/', "-").replace('_', "-");
 
-            // Find the best matching session for this process
-            // (most recently modified session that matches this process's cwd and isn't already used)
-            let matching_session = session_files.iter().find(|(_, path, project_dir, project_path, _, has_reliable_path)| {
-                // Get session ID and check if already used
-                let session_id = match path.file_stem().and_then(|s| s.to_str()) {
-                    Some(id) => id,
-                    None => return false,
-                };
-                if used_session_ids.contains(session_id) {
-                    return false;
-                }
-
+            // Helper closure to check if a session matches the process path
+            let path_matches = |project_dir: &Path, project_path: &Path, has_reliable_path: bool| -> bool {
                 let dir_name = project_dir
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("");
 
-                // Method 1: Direct path comparison
-                let direct_match = if *has_reliable_path {
+                // Method 1: Direct path comparison (exact or subdirectory match)
+                let direct_match = if has_reliable_path {
                     proc_cwd == project_path
                         || proc_cwd.starts_with(project_path)
-                        || project_path.starts_with(proc_cwd)
                 } else {
                     false
                 };
@@ -201,6 +190,36 @@ impl SessionDetector {
                 let encoded_match = dir_name == encoded_cwd;
 
                 direct_match || encoded_match
+            };
+
+            // Helper closure to check if session is not already used
+            let session_available = |path: &Path| -> bool {
+                match path.file_stem().and_then(|s| s.to_str()) {
+                    Some(id) => !used_session_ids.contains(id),
+                    None => false,
+                }
+            };
+
+            // Find session with activity after process start
+            // Only match sessions that were modified AFTER the process started
+            // This prevents matching a new Claude instance (with no session file yet)
+            // to an older session from the same project directory
+            let matching_session = session_files.iter().find(|(modified, path, project_dir, project_path, _, has_reliable_path)| {
+                if !session_available(path) {
+                    return false;
+                }
+
+                // Check if the session was modified after the process started
+                let session_active_after_proc_start = match modified.duration_since(std::time::UNIX_EPOCH) {
+                    Ok(duration) => {
+                        let session_modified_secs = duration.as_secs();
+                        // Session must have been modified at or after process start (with 5s buffer)
+                        session_modified_secs + 5 >= proc.start_time
+                    }
+                    Err(_) => false,
+                };
+
+                session_active_after_proc_start && path_matches(project_dir, project_path, *has_reliable_path)
             });
 
             if let Some((_, path, project_dir, _, project_name, _)) = matching_session {

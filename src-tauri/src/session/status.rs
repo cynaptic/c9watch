@@ -36,45 +36,95 @@ pub enum SessionStatus {
 /// # Returns
 /// The determined session status
 pub fn determine_status(entries: &[SessionEntry]) -> SessionStatus {
-    // If no entries or very few entries, session is likely starting up
+    // If no entries, session is likely starting up
     if entries.is_empty() {
         return SessionStatus::Connecting;
     }
 
-    // Get the last entry
-    let last_entry = &entries[entries.len() - 1];
+    // Find the last meaningful entry (User or Assistant), skipping progress,
+    // file-history-snapshot, summary, and other non-status-bearing entries.
+    // Claude Code writes "progress" entries during tool execution (e.g., bash_progress)
+    // which must not override the actual session status.
+    let last_meaningful = entries.iter().rev().find(|entry| {
+        matches!(entry, SessionEntry::User { .. } | SessionEntry::Assistant { .. })
+    });
+
+    let last_entry = match last_meaningful {
+        Some(entry) => entry,
+        None => return SessionStatus::Connecting,
+    };
+
+    // Also check if there are any recent progress entries AFTER the last meaningful entry.
+    // Progress entries (e.g., bash_progress) indicate active tool execution.
+    let last_meaningful_idx = entries.iter().rposition(|entry| {
+        matches!(entry, SessionEntry::User { .. } | SessionEntry::Assistant { .. })
+    }).unwrap_or(0);
+    let has_trailing_progress = entries[last_meaningful_idx + 1..].iter().any(|entry| {
+        matches!(entry, SessionEntry::Unknown)
+    });
 
     match last_entry {
-        SessionEntry::User { .. } => {
-            // User just sent a message, Claude should be responding
-            SessionStatus::Working
-        }
-        SessionEntry::Assistant { base, message } => {
-            // Get the raw status from analyzing the message
-            // This now uses PermissionChecker to determine if tools need permission
-            let raw_status = analyze_assistant_message(message);
-
-            // If status is Working (auto-approved tools running), apply a brief
-            // grace period in case the tool completes very quickly
-            if raw_status == SessionStatus::Working {
-                // Check if there are pending tool uses
-                let has_pending_tools = has_pending_tool_uses(&message.content);
-                if has_pending_tools && !is_entry_recent(&base.timestamp, 2) {
-                    // Auto-approved tool running for > 2 seconds - still Working
-                    // (this is normal for slower operations like file reads)
+        SessionEntry::User { base, message } => {
+            // Check if this is a tool_result or an actual user prompt.
+            // Tool results mean Claude is still processing.
+            if message.is_tool_result {
+                // This is a tool result - Claude should be generating its next response
+                // But if it's old, the session might be idle (process died, etc.)
+                if is_entry_recent(&base.timestamp, 15) {
                     SessionStatus::Working
                 } else {
-                    raw_status
+                    SessionStatus::WaitingForInput
                 }
+            } else if is_entry_recent(&base.timestamp, 30) {
+                // Recent user prompt - Claude should be responding
+                SessionStatus::Working
             } else {
-                // NeedsPermission, WaitingForInput, etc. - return immediately
-                // No delay for permission prompts!
-                raw_status
+                // Old user prompt with no response - session is likely idle
+                SessionStatus::WaitingForInput
+            }
+        }
+        SessionEntry::Assistant { base, message } => {
+            // Analyze the assistant message content
+            let raw_status = analyze_assistant_message(message);
+
+            match raw_status {
+                SessionStatus::Working => {
+                    // "Working" from analyze_assistant_message means either:
+                    // 1. Pending tool_use (auto-approved) - check for trailing progress
+                    // 2. Text with no stop_reason (but stop_reason is always None in JSONL)
+                    //
+                    // Use recency + trailing progress to distinguish active from idle
+                    let has_pending_tools = has_pending_tool_uses(&message.content);
+
+                    if has_pending_tools {
+                        // Tool is pending - check if there's active progress or recent activity
+                        if has_trailing_progress || is_entry_recent(&base.timestamp, 10) {
+                            SessionStatus::Working
+                        } else {
+                            // Pending tool but no recent activity - likely stale
+                            SessionStatus::Working
+                        }
+                    } else {
+                        // No pending tools, just text/thinking content.
+                        // Since stop_reason is always None in JSONL, we use recency:
+                        // if the entry was written recently, Claude is likely still
+                        // streaming or about to write more. If old, session is idle.
+                        if is_entry_recent(&base.timestamp, 10) {
+                            SessionStatus::Working
+                        } else {
+                            SessionStatus::WaitingForInput
+                        }
+                    }
+                }
+                SessionStatus::NeedsPermission => {
+                    // Permission-needing tool - return immediately, no delay
+                    SessionStatus::NeedsPermission
+                }
+                _ => raw_status,
             }
         }
         _ => {
-            // For file history snapshots, summaries, or unknown entries,
-            // default to waiting for input
+            // Should not reach here since we filtered for User/Assistant above
             SessionStatus::WaitingForInput
         }
     }
@@ -263,9 +313,26 @@ mod tests {
     use crate::session::parser::{SessionEntryBase, UserMessage};
 
     fn create_base() -> SessionEntryBase {
+        // Use current time so recency checks pass in tests
+        let now = Utc::now().to_rfc3339();
         SessionEntryBase {
             uuid: "test-uuid".to_string(),
-            timestamp: "2026-02-06T12:00:00Z".to_string(),
+            timestamp: now,
+            session_id: Some("test-session".to_string()),
+            cwd: None,
+            version: None,
+            git_branch: None,
+            parent_uuid: None,
+            is_sidechain: None,
+            slug: None,
+        }
+    }
+
+    fn create_old_base() -> SessionEntryBase {
+        // Use an old timestamp to simulate stale/idle entries
+        SessionEntryBase {
+            uuid: "test-uuid".to_string(),
+            timestamp: "2026-01-01T12:00:00Z".to_string(),
             session_id: Some("test-session".to_string()),
             cwd: None,
             version: None,
@@ -290,6 +357,7 @@ mod tests {
                 message: UserMessage {
                     role: "user".to_string(),
                     content: "Hello".to_string(),
+                    is_tool_result: false,
                 },
             }
         ];
@@ -298,9 +366,10 @@ mod tests {
 
     #[test]
     fn test_assistant_text_completed() {
+        // Old entry with end_turn should be WaitingForInput
         let entries = vec![
             SessionEntry::Assistant {
-                base: create_base(),
+                base: create_old_base(),
                 message: AssistantMessage {
                     model: "claude-opus-4-5-20251101".to_string(),
                     id: "msg_test".to_string(),
@@ -560,5 +629,133 @@ mod tests {
             }
         ];
         assert!(!check_all_tools_completed(&incomplete_content));
+    }
+
+    #[test]
+    fn test_unknown_entries_after_tool_use_dont_override_status() {
+        // Simulates: assistant(tool_use Bash) followed by Unknown entries (progress)
+        // Status should still reflect the pending Bash tool, not WaitingForInput
+        let entries = vec![
+            SessionEntry::Assistant {
+                base: create_base(),
+                message: AssistantMessage {
+                    model: "claude-opus-4-5-20251101".to_string(),
+                    id: "msg_test".to_string(),
+                    role: "assistant".to_string(),
+                    content: vec![
+                        MessageContent::ToolUse {
+                            id: "toolu_123".to_string(),
+                            name: "Bash".to_string(),
+                            input: serde_json::json!({"command": "cargo build"}),
+                        }
+                    ],
+                    stop_reason: Some("tool_use".to_string()),
+                    stop_sequence: None,
+                    usage: None,
+                },
+            },
+            // Progress entries (parsed as Unknown from "progress" type in JSONL)
+            SessionEntry::Unknown,
+            SessionEntry::Unknown,
+        ];
+        // Should NOT be WaitingForInput - should see the pending Bash tool
+        let status = determine_status(&entries);
+        assert_ne!(status, SessionStatus::WaitingForInput);
+        // Bash with "cargo build" is not in default auto-approved list
+        assert_eq!(status, SessionStatus::NeedsPermission);
+    }
+
+    #[test]
+    fn test_unknown_entries_after_user_message_still_working() {
+        // Simulates: user message followed by Unknown entries (progress from sub-agent)
+        let entries = vec![
+            SessionEntry::User {
+                base: create_base(),
+                message: UserMessage {
+                    role: "user".to_string(),
+                    content: "Hello".to_string(),
+                    is_tool_result: false,
+                },
+            },
+            SessionEntry::Unknown,
+            SessionEntry::Unknown,
+        ];
+        assert_eq!(determine_status(&entries), SessionStatus::Working);
+    }
+
+    #[test]
+    fn test_only_unknown_entries_means_connecting() {
+        // If all entries are Unknown (e.g., all progress), treat as Connecting
+        let entries = vec![
+            SessionEntry::Unknown,
+            SessionEntry::Unknown,
+        ];
+        assert_eq!(determine_status(&entries), SessionStatus::Connecting);
+    }
+
+    #[test]
+    fn test_old_assistant_text_no_stop_reason_is_idle() {
+        // Realistic scenario: stop_reason is always None in Claude Code JSONL.
+        // An old text-only assistant message with no stop_reason should be idle.
+        let entries = vec![
+            SessionEntry::Assistant {
+                base: create_old_base(),
+                message: AssistantMessage {
+                    model: "claude-opus-4-5-20251101".to_string(),
+                    id: "msg_test".to_string(),
+                    role: "assistant".to_string(),
+                    content: vec![
+                        MessageContent::Text {
+                            text: "Here's my response.".to_string(),
+                        }
+                    ],
+                    stop_reason: None,
+                    stop_sequence: None,
+                    usage: None,
+                },
+            }
+        ];
+        assert_eq!(determine_status(&entries), SessionStatus::WaitingForInput);
+    }
+
+    #[test]
+    fn test_recent_assistant_text_no_stop_reason_is_working() {
+        // Recent text-only assistant message with no stop_reason means
+        // Claude is still actively streaming / generating
+        let entries = vec![
+            SessionEntry::Assistant {
+                base: create_base(),
+                message: AssistantMessage {
+                    model: "claude-opus-4-5-20251101".to_string(),
+                    id: "msg_test".to_string(),
+                    role: "assistant".to_string(),
+                    content: vec![
+                        MessageContent::Text {
+                            text: "Working on it...".to_string(),
+                        }
+                    ],
+                    stop_reason: None,
+                    stop_sequence: None,
+                    usage: None,
+                },
+            }
+        ];
+        assert_eq!(determine_status(&entries), SessionStatus::Working);
+    }
+
+    #[test]
+    fn test_old_user_prompt_is_idle() {
+        // A user prompt from long ago with no response should be idle
+        let entries = vec![
+            SessionEntry::User {
+                base: create_old_base(),
+                message: UserMessage {
+                    role: "user".to_string(),
+                    content: "Hello".to_string(),
+                    is_tool_result: false,
+                },
+            }
+        ];
+        assert_eq!(determine_status(&entries), SessionStatus::WaitingForInput);
     }
 }

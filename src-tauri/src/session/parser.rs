@@ -75,10 +75,78 @@ pub struct SessionEntryBase {
 }
 
 /// User message structure
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// In Claude Code's JSONL format, user message content can be either:
+/// - A plain string (for actual user prompts)
+/// - An array of content blocks (for tool results sent back to Claude)
+#[derive(Debug, Clone, Serialize)]
 pub struct UserMessage {
     pub role: String,
     pub content: String,
+    /// Whether this user entry is a tool result rather than an actual user prompt
+    pub is_tool_result: bool,
+}
+
+impl<'de> Deserialize<'de> for UserMessage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde_json::Value;
+
+        let value = Value::deserialize(deserializer)?;
+        let role = value.get("role")
+            .and_then(|r| r.as_str())
+            .unwrap_or("user")
+            .to_string();
+
+        let content_value = value.get("content");
+
+        let (content, is_tool_result) = match content_value {
+            Some(Value::String(s)) => (s.clone(), false),
+            Some(Value::Array(arr)) => {
+                let mut parts = Vec::new();
+                for item in arr {
+                    match item.get("type").and_then(|t| t.as_str()) {
+                        Some("tool_result") => {
+                            if let Some(content) = item.get("content") {
+                                match content {
+                                    Value::String(s) => parts.push(s.clone()),
+                                    Value::Array(inner) => {
+                                        for block in inner {
+                                            if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                                                parts.push(text.to_string());
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        Some("text") => {
+                            if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+                                parts.push(text.to_string());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let text = if parts.is_empty() {
+                    "[tool result]".to_string()
+                } else {
+                    parts.join("\n")
+                };
+                (text, true)
+            }
+            _ => (String::new(), false),
+        };
+
+        Ok(UserMessage {
+            role,
+            content,
+            is_tool_result,
+        })
+    }
 }
 
 /// Assistant message structure
@@ -205,6 +273,21 @@ pub fn parse_last_n_entries<P: AsRef<Path>>(
     Ok(parse_jsonl_entries(lines))
 }
 
+/// Parse all entries from a session JSONL file
+pub fn parse_all_entries<P: AsRef<Path>>(path: P) -> Result<Vec<SessionEntry>, String> {
+    let file = File::open(path.as_ref())
+        .map_err(|e| format!("Failed to open JSONL file: {}", e))?;
+
+    let reader = BufReader::new(file);
+    let lines: Vec<String> = reader
+        .lines()
+        .filter_map(|line| line.ok())
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+
+    Ok(parse_jsonl_entries(lines))
+}
+
 /// Get all user and assistant messages from session entries
 pub fn extract_messages(entries: &[SessionEntry]) -> Vec<(String, MessageType, String)> {
     let mut messages = Vec::new();
@@ -212,11 +295,20 @@ pub fn extract_messages(entries: &[SessionEntry]) -> Vec<(String, MessageType, S
     for entry in entries {
         match entry {
             SessionEntry::User { base, message } => {
-                messages.push((
-                    base.timestamp.clone(),
-                    MessageType::User,
-                    message.content.clone(),
-                ));
+                if message.is_tool_result {
+                    // Tool result entries should be shown as ToolResult, not User
+                    messages.push((
+                        base.timestamp.clone(),
+                        MessageType::ToolResult,
+                        message.content.clone(),
+                    ));
+                } else {
+                    messages.push((
+                        base.timestamp.clone(),
+                        MessageType::User,
+                        message.content.clone(),
+                    ));
+                }
             }
             SessionEntry::Assistant { base, message } => {
                 for content in &message.content {
@@ -380,5 +472,83 @@ mod tests {
         } else {
             panic!("Failed to parse tool use");
         }
+    }
+
+    #[test]
+    fn test_parse_user_message_with_tool_result_content() {
+        // In Claude Code's JSONL, tool result messages have content as an array
+        let json = r#"{
+            "type": "user",
+            "uuid": "test-uuid",
+            "timestamp": "2026-01-08T15:23:03.096Z",
+            "sessionId": "test-session",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_123",
+                        "content": "command output here"
+                    }
+                ]
+            }
+        }"#;
+
+        let entry: Result<SessionEntry, _> = serde_json::from_str(json);
+        assert!(entry.is_ok(), "Should parse user message with array content");
+
+        if let Ok(SessionEntry::User { message, .. }) = entry {
+            assert!(message.content.contains("command output here"));
+        } else {
+            panic!("Expected User entry");
+        }
+    }
+
+    #[test]
+    fn test_parse_user_message_with_nested_tool_result() {
+        // tool_result content can also be an array of content blocks
+        let json = r#"{
+            "type": "user",
+            "uuid": "test-uuid",
+            "timestamp": "2026-01-08T15:23:03.096Z",
+            "sessionId": "test-session",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_456",
+                        "content": [
+                            {"type": "text", "text": "file contents here"}
+                        ]
+                    }
+                ]
+            }
+        }"#;
+
+        let entry: Result<SessionEntry, _> = serde_json::from_str(json);
+        assert!(entry.is_ok(), "Should parse user message with nested array tool_result content");
+
+        if let Ok(SessionEntry::User { message, .. }) = entry {
+            assert!(message.content.contains("file contents here"));
+        } else {
+            panic!("Expected User entry");
+        }
+    }
+
+    #[test]
+    fn test_parse_progress_entry() {
+        // Progress entries should parse as Unknown (not cause errors)
+        let json = r#"{
+            "type": "progress",
+            "uuid": "test-uuid",
+            "timestamp": "2026-01-08T15:23:03.096Z",
+            "data": {"type": "bash_progress"},
+            "toolUseID": "toolu_123"
+        }"#;
+
+        let entry: Result<SessionEntry, _> = serde_json::from_str(json);
+        assert!(entry.is_ok(), "Progress entries should parse as Unknown");
+        assert!(matches!(entry.unwrap(), SessionEntry::Unknown));
     }
 }
