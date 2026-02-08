@@ -7,7 +7,7 @@
 #
 # This script:
 #   1. Detects your Mac's architecture (Apple Silicon or Intel)
-#   2. Downloads the latest release from GitHub
+#   2. Downloads the latest signed DMG from GitHub
 #   3. Installs c9watch.app to /Applications
 #
 set -euo pipefail
@@ -54,22 +54,29 @@ info "Latest version: ${LATEST_TAG}"
 
 # --- Download ---
 
-DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST_TAG}/${APP_NAME}_${LATEST_TAG}_${ARCH_LABEL}.app.tar.gz"
+DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST_TAG}/${APP_NAME}_${LATEST_TAG}_${ARCH_LABEL}.dmg"
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
 info "Downloading ${APP_NAME} for ${ARCH_LABEL}..."
-curl -fSL --progress-bar "$DOWNLOAD_URL" -o "$TMPDIR/${APP_NAME}.tar.gz"
+curl -fSL --progress-bar "$DOWNLOAD_URL" -o "$TMPDIR/${APP_NAME}.dmg"
 
-# --- Extract and install ---
+# --- Mount and install ---
 
-info "Extracting..."
-tar -xzf "$TMPDIR/${APP_NAME}.tar.gz" -C "$TMPDIR"
+info "Mounting DMG..."
+MOUNT_POINT=$(hdiutil attach "$TMPDIR/${APP_NAME}.dmg" -nobrowse -noverify | grep "/Volumes/" | tail -1 | awk '{print $3}')
 
-# Find the .app bundle (name may vary)
-APP_BUNDLE=$(find "$TMPDIR" -maxdepth 2 -name "*.app" -type d | head -1)
+if [ -z "$MOUNT_POINT" ]; then
+  error "Failed to mount DMG"
+fi
+
+# Ensure we unmount on exit
+trap 'hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true; rm -rf "$TMPDIR"' EXIT
+
+# Find the .app bundle
+APP_BUNDLE=$(find "$MOUNT_POINT" -maxdepth 1 -name "*.app" -type d | head -1)
 if [ -z "$APP_BUNDLE" ]; then
-  error "No .app bundle found in the downloaded archive"
+  error "No .app bundle found in DMG"
 fi
 
 APP_BASENAME=$(basename "$APP_BUNDLE")
@@ -81,10 +88,7 @@ if [ -d "${INSTALL_DIR}/${APP_BASENAME}" ]; then
 fi
 
 info "Installing to ${INSTALL_DIR}/${APP_BASENAME}..."
-mv "$APP_BUNDLE" "${INSTALL_DIR}/"
-
-# Clear quarantine attribute so Gatekeeper doesn't block it
-xattr -cr "${INSTALL_DIR}/${APP_BASENAME}" 2>/dev/null || true
+cp -R "$APP_BUNDLE" "${INSTALL_DIR}/"
 
 # --- Done ---
 
