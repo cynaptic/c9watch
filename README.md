@@ -34,13 +34,6 @@ Just open c9watch and see everything.
 curl -fsSL https://raw.githubusercontent.com/minchenlee/c9watch/main/install.sh | bash
 ```
 
-### Homebrew
-
-```bash
-brew tap minchenlee/tap
-brew install --cask c9watch
-```
-
 ### Download
 
 Grab the latest `.dmg` from the [Releases](https://github.com/minchenlee/c9watch/releases) page.
@@ -90,7 +83,6 @@ c9watch/
 │           ├── status.rs   # Status determination logic
 │           ├── parser.rs   # JSONL file parsing
 │           └── permissions.rs # Auto-approval rule checking
-└── homebrew/               # Homebrew cask distribution
 ```
 
 ## How it works
