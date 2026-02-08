@@ -1,28 +1,18 @@
 <script lang="ts">
 	import type { Session } from '$lib/types';
 	import { SessionStatus } from '$lib/types';
-	import { getSessionUIState, updateSessionUIState } from '$lib/stores/sessions';
 	import { invoke } from '@tauri-apps/api/core';
+
 
 	interface Props {
 		session: Session;
+		compact?: boolean;
 		onexpand?: () => void;
-		onapprove?: () => void;
 		onstop?: () => void;
 		onopen?: () => void;
-		onsend?: (prompt: string) => void;
 	}
 
-	let { session, onexpand, onapprove, onstop, onopen, onsend }: Props = $props();
-
-	let uiState = $derived(getSessionUIState(session.id));
-	let quickInput = $state('');
-
-	$effect(() => {
-		if (quickInput !== uiState.draftPrompt) {
-			updateSessionUIState(session.id, { draftPrompt: quickInput });
-		}
-	});
+	let { session, compact = false, onexpand, onstop, onopen }: Props = $props();
 
 	let needsAttention = $derived(
 		session.status === SessionStatus.NeedsPermission ||
@@ -33,9 +23,10 @@
 	let isWaitingInput = $derived(session.status === SessionStatus.WaitingForInput);
 	let isWorking = $derived(session.status === SessionStatus.Working);
 
-	let menuOpen = $state(false);
 	let isEditingName = $state(false);
 	let tempName = $state(session.projectName);
+
+	let cardTitle = $derived(session.summary || session.firstPrompt);
 
 	function getStatusColor(): string {
 		switch (session.status) {
@@ -46,9 +37,9 @@
 			case SessionStatus.WaitingForInput:
 				return 'var(--status-input)';
 			case SessionStatus.Connecting:
-				return 'var(--status-connecting)';
+				return 'var(--status-working)';
 			default:
-				return 'var(--status-connecting)';
+				return 'var(--status-working)';
 		}
 	}
 
@@ -85,10 +76,7 @@
 	function handleCardClick(e: MouseEvent) {
 		const target = e.target as HTMLElement;
 		if (
-			target.closest('.action-button') ||
-			target.closest('.quick-input') ||
-			target.closest('.menu-trigger') ||
-			target.closest('.menu-dropdown') ||
+			target.closest('.action-btn') ||
 			target.closest('.project-name-input')
 		) {
 			return;
@@ -106,40 +94,14 @@
 		}
 	}
 
-	function handleApprove(e: MouseEvent) {
-		e.stopPropagation();
-		onapprove?.();
-	}
-
-	function handleQuickSend(e: MouseEvent | KeyboardEvent) {
-		e.stopPropagation();
-		if (quickInput.trim()) {
-			onsend?.(quickInput.trim());
-			quickInput = '';
-		}
-	}
-
-	function handleKeydown(e: KeyboardEvent) {
-		if (e.key === 'Enter' && !e.shiftKey) {
-			e.preventDefault();
-			handleQuickSend(e);
-		}
-	}
-
-	function toggleMenu(e: MouseEvent) {
-		e.stopPropagation();
-		menuOpen = !menuOpen;
-	}
 
 	function handleStop(e: MouseEvent) {
 		e.stopPropagation();
-		menuOpen = false;
 		onstop?.();
 	}
 
 	function handleOpen(e: MouseEvent) {
 		e.stopPropagation();
-		menuOpen = false;
 		onopen?.();
 	}
 
@@ -164,11 +126,10 @@
 		}
 	}
 
-	function startEditing(e: MouseEvent) {
-		e.stopPropagation();
+	function startEditing(e?: MouseEvent) {
+		e?.stopPropagation();
 		tempName = session.projectName;
 		isEditingName = true;
-		menuOpen = false;
 	}
 
 	function autofocus(node: HTMLElement) {
@@ -181,6 +142,7 @@
 
 <div
 	class="session-card"
+	class:compact
 	class:attention={needsAttention}
 	class:permission={isPermission}
 	class:waiting={isWaitingInput}
@@ -192,8 +154,13 @@
 >
 	<!-- Card Content -->
 	<div class="card-body">
-		<!-- Header -->
+		<!-- Header (Summary as Title) -->
 		<div class="card-header">
+			<h3 class="card-main-title">{cardTitle}</h3>
+		</div>
+
+		<!-- Project & Stats Row -->
+		<div class="stats-row">
 			{#if isEditingName}
 				<input
 					type="text"
@@ -205,107 +172,87 @@
 					onclick={(e) => e.stopPropagation()}
 				/>
 			{:else}
-				<h3 class="project-name" ondblclick={startEditing}>{session.projectName}</h3>
+				<span class="project-badge" ondblclick={() => startEditing()}>{session.projectName}</span>
 			{/if}
-			<span class="message-count">
-				<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-					<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-				</svg>
-				{session.messageCount}
-			</span>
-			<span class="time-badge">{formatTimeSince(session.modified)}</span>
-			<div class="menu-container">
-				<button type="button" class="menu-trigger" onclick={toggleMenu} aria-label="More actions">
-					<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-						<circle cx="12" cy="6" r="1.5" fill="currentColor" />
-						<circle cx="12" cy="12" r="1.5" fill="currentColor" />
-						<circle cx="12" cy="18" r="1.5" fill="currentColor" />
-					</svg>
-				</button>
-				{#if menuOpen}
-					<div class="menu-dropdown">
-						<button type="button" class="menu-item" onclick={startEditing}>
-							<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-								<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-								<path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
-							</svg>
-							Rename
-						</button>
-						<button type="button" class="menu-item danger" onclick={handleStop}>
-							<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-								<rect x="6" y="6" width="12" height="12" rx="1" />
-							</svg>
-							Stop
-						</button>
-						<button type="button" class="menu-item" onclick={handleOpen}>
-							<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-								<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
-								<polyline points="15 3 21 3 21 9" />
-								<line x1="10" y1="14" x2="21" y2="3" />
-							</svg>
-							Open
-						</button>
-					</div>
-				{/if}
-			</div>
+			
+			{#if !compact}
+				<div class="stats-group">
+					<span class="message-count">
+						<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+							<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+						</svg>
+						{session.messageCount}
+					</span>
+					<span class="time-badge">{formatTimeSince(session.modified)}</span>
+				</div>
+			{/if}
+			
+			{#if compact}
+				<div class="status-label" style="color: {getStatusColor()}">
+					{getStatusLabel()}
+				</div>
+			{/if}
 		</div>
 
-		<!-- Git Branch -->
-		{#if session.gitBranch}
-			<div class="git-branch">
-				<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-					<line x1="6" y1="3" x2="6" y2="15" />
-					<circle cx="18" cy="6" r="3" />
-					<circle cx="6" cy="18" r="3" />
-					<path d="M18 9a9 9 0 0 1-9 9" />
-				</svg>
-				<span class="branch-name">{session.gitBranch}</span>
+		{#if !compact}
+			<!-- Git Branch -->
+			{#if session.gitBranch}
+				<div class="git-branch">
+					<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+						<line x1="6" y1="3" x2="6" y2="15" />
+						<circle cx="18" cy="6" r="3" />
+						<circle cx="6" cy="18" r="3" />
+						<path d="M18 9a9 9 0 0 1-9 9" />
+					</svg>
+					<span class="branch-name">{session.gitBranch}</span>
+				</div>
+			{/if}
+
+			<!-- Status Label -->
+			<div class="status-label" style="color: {getStatusColor()}">
+				{getStatusLabel()}
 			</div>
 		{/if}
 
-		<!-- Status Label -->
-		<div class="status-label" style="color: {getStatusColor()}">
-			{getStatusLabel()}
-		</div>
+		{#if !compact}
+			<!-- Message Preview -->
+			<p class="task-preview">{session.latestMessage || session.firstPrompt}</p>
 
-		<!-- Task Preview -->
-		<!-- Task Preview -->
-		<p class="task-preview">{session.firstPrompt}</p>
-
-		<!-- Action Area -->
-		{#if isPermission}
-			<div class="action-area">
-				<button type="button" class="action-button approve-button" onclick={handleApprove}>
-					<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-						<polyline points="20 6 9 17 4 12" />
-					</svg>
-					Approve
-				</button>
-			</div>
-		{:else if isWaitingInput}
-			<div class="action-area">
-				<div class="quick-input-wrapper">
-					<input
-						type="text"
-						class="quick-input"
-						placeholder="Quick reply..."
-						bind:value={quickInput}
-						onkeydown={handleKeydown}
-						onclick={(e) => e.stopPropagation()}
-					/>
-					<button
-						type="button"
-						class="send-button"
-						onclick={handleQuickSend}
-						disabled={!quickInput.trim()}
-						aria-label="Send message"
-					>
-						<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-							<line x1="22" y1="2" x2="11" y2="13" />
-							<polygon points="22 2 15 22 11 13 2 9 22 2" />
+			<!-- Bottom Actions -->
+			<div class="card-actions-container">
+				<div class="card-actions">
+					<button type="button" class="action-btn" onclick={(e) => startEditing(e)} title="Rename">
+						<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+							<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+							<path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
 						</svg>
+						RENAME
+					</button>
+					<button type="button" class="action-btn danger" onclick={handleStop} title="Stop">
+						<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+							<rect x="6" y="6" width="12" height="12" rx="1" />
+						</svg>
+						STOP
+					</button>
+					<button type="button" class="action-btn primary" onclick={handleOpen} title="Open">
+						<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+							<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+							<polyline points="15 3 21 3 21 9" />
+							<line x1="10" y1="14" x2="21" y2="3" />
+						</svg>
+						OPEN
 					</button>
 				</div>
+			</div>
+		{:else}
+			<div class="compact-actions">
+				<button type="button" class="action-btn icon-only" onclick={handleOpen} title="Open">
+					<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+						<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+						<polyline points="15 3 21 3 21 9" />
+						<line x1="10" y1="14" x2="21" y2="3" />
+					</svg>
+				</button>
 			</div>
 		{/if}
 	</div>
@@ -320,14 +267,17 @@
 		background: var(--bg-card);
 		border: 1px solid var(--border-default);
 		cursor: pointer;
-		transition: border-color var(--transition-fast);
+		transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 		text-align: left;
 		width: 100%;
 		height: 235px;
 	}
 
+
 	.session-card:hover {
 		border-color: var(--text-muted);
+		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+		background: var(--bg-card-hover);
 	}
 
 	/* Card Body */
@@ -345,19 +295,38 @@
 		gap: var(--space-sm);
 	}
 
-	.project-name {
+	.card-main-title {
 		font-family: var(--font-pixel);
-		font-size: 14px;
-		font-weight: 500;
+		font-size: 15px;
+		font-weight: 600;
 		color: var(--text-primary);
 		margin: 0;
-		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		letter-spacing: 0.05em;
 		text-transform: uppercase;
-		flex: 1;
-		min-width: 0;
+		display: -webkit-box;
+		-webkit-line-clamp: 2;
+		line-clamp: 2;
+		-webkit-box-orient: vertical;
+	}
+
+	.project-badge {
+		font-family: var(--font-mono);
+		font-size: 11px;
+		font-weight: 500;
+		color: var(--text-muted);
+		background: var(--bg-elevated);
+		padding: 2px 6px;
+		border: 1px solid var(--border-default);
+		text-transform: uppercase;
+		letter-spacing: 0.1em;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		display: inline-block;
+		vertical-align: middle;
+		max-width: 100%;
 	}
 
 	.project-name-input {
@@ -381,7 +350,7 @@
 		align-items: center;
 		gap: 4px;
 		font-family: var(--font-mono);
-		font-size: 10px;
+		font-size: 12px;
 		color: var(--text-muted);
 		text-transform: lowercase;
 		min-width: 0;
@@ -401,17 +370,18 @@
 
 	.time-badge {
 		font-family: var(--font-mono);
-		font-size: 10px;
+		font-size: 12px;
 		font-weight: 500;
 		color: var(--text-muted);
 		text-transform: uppercase;
 		letter-spacing: 0.05em;
 	}
 
+
 	/* Status Label */
 	.status-label {
 		font-family: var(--font-mono);
-		font-size: 10px;
+		font-size: 12px;
 		font-weight: 500;
 		text-transform: uppercase;
 		letter-spacing: 0.1em;
@@ -419,11 +389,12 @@
 
 	/* Task Preview */
 	.task-preview {
-		font-size: 12px;
+		font-size: 14px;
 		color: var(--text-secondary);
 		line-height: 1.5;
 		display: -webkit-box;
 		-webkit-line-clamp: 2;
+		line-clamp: 2;
 		-webkit-box-orient: vertical;
 		overflow: hidden;
 		margin: var(--space-xs) 0;
@@ -434,142 +405,147 @@
 		align-items: center;
 		gap: 4px;
 		font-family: var(--font-mono);
-		font-size: 10px;
+		font-size: 12px;
 		color: var(--text-muted);
 		text-transform: uppercase;
 		letter-spacing: 0.05em;
 	}
 
-	/* Menu */
-	.menu-container {
-		position: relative;
-	}
-
-	.menu-trigger {
+	/* Card Actions */
+	.stats-row {
 		display: flex;
 		align-items: center;
-		justify-content: center;
-		width: 24px;
-		height: 24px;
-		color: var(--text-muted);
-		transition: color var(--transition-fast);
+		justify-content: space-between;
+		gap: var(--space-md);
 	}
 
-	.menu-trigger:hover {
-		color: var(--text-primary);
-	}
-
-	.menu-dropdown {
-		position: absolute;
-		top: 100%;
-		right: 0;
-		margin-top: 4px;
-		background: var(--bg-card);
-		border: 1px solid var(--border-default);
-		z-index: 100;
-		min-width: 100px;
-		padding: var(--space-xs);
-	}
-
-	.menu-item {
+	.stats-group {
 		display: flex;
 		align-items: center;
-		gap: var(--space-sm);
-		width: 100%;
-		padding: var(--space-sm) var(--space-md);
-		font-family: var(--font-mono);
-		font-size: 11px;
-		font-weight: 500;
-		color: var(--text-secondary);
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		transition: color var(--transition-fast);
+		gap: var(--space-md);
 	}
 
-	.menu-item:hover {
-		color: var(--text-primary);
-	}
-
-	.menu-item.danger:hover {
-		color: var(--accent-red);
-	}
-
-	.action-area {
+	.card-actions-container {
 		margin-top: auto;
-		padding-top: var(--space-md);
-		border-top: 1px solid var(--border-muted);
+		display: flex;
+		justify-content: flex-end;
+		padding-top: var(--space-sm);
 	}
 
-	.action-button {
-		display: inline-flex;
+	.card-actions {
+		display: flex;
+		gap: var(--space-xs);
+	}
+
+	.action-btn {
+		display: flex;
 		align-items: center;
-		gap: var(--space-sm);
-		padding: var(--space-sm) var(--space-lg);
+		gap: 6px;
+		padding: 4px 8px;
+		background: var(--bg-base);
+		border: 1px solid var(--border-default);
+		color: var(--text-muted);
 		font-family: var(--font-mono);
-		font-size: 11px;
-		font-weight: 500;
+		font-size: 10px;
+		font-weight: 600;
 		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		border: 1px solid transparent;
-		transition: all var(--transition-fast);
+		letter-spacing: 0.1em;
+		transition: all 0.2s ease;
+		cursor: pointer;
 	}
 
-	.approve-button {
-		background: var(--status-permission);
-		color: var(--bg-base);
+	.action-btn:hover {
+		background: var(--bg-card-hover);
+		color: var(--text-primary);
+		border-color: var(--text-muted);
+	}
+
+	.action-btn.danger:hover {
+		color: var(--status-permission);
 		border-color: var(--status-permission);
 	}
 
-	.approve-button:hover {
-		background: transparent;
-		color: var(--status-permission);
-	}
-
-	/* Quick Input */
-	.quick-input-wrapper {
-		display: flex;
-		gap: var(--space-sm);
-	}
-
-	.quick-input {
-		flex: 1;
-		padding: var(--space-sm) var(--space-md);
-		background: var(--bg-base);
-		border: 1px solid var(--border-default);
-		color: var(--text-primary);
-		font-family: var(--font-mono);
-		font-size: 12px;
-		transition: border-color var(--transition-fast);
-	}
-
-	.quick-input:focus {
-		outline: none;
-		border-color: var(--status-input);
-	}
-
-	.quick-input::placeholder {
-		color: var(--text-muted);
-	}
-
-	.send-button {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 32px;
-		height: 32px;
-		background: var(--status-input);
+	.action-btn.primary {
+		background: var(--text-primary);
 		color: var(--bg-base);
-		border: 1px solid var(--status-input);
-		transition: all var(--transition-fast);
+		border-color: var(--text-primary);
 	}
 
-	.send-button:hover:not(:disabled) {
+	.action-btn.primary:hover {
+		background: var(--text-secondary);
+		border-color: var(--text-secondary);
+	}
+
+	.action-btn svg {
+		flex-shrink: 0;
+	}
+
+	/* Compact Mode Styles */
+	.session-card.compact {
+		height: auto;
+		min-height: auto;
+		padding: var(--space-md);
+		gap: var(--space-md);
+		align-items: center;
+	}
+
+	.session-card.compact .project-badge {
+		max-width: 150px;
+	}
+
+	.session-card.compact .card-body {
+		gap: 4px;
+		justify-content: center;
+		padding-right: 32px;
+	}
+
+	.session-card.compact .card-main-title {
+		font-size: 13px;
+		-webkit-line-clamp: 1;
+		line-clamp: 1;
+		margin-bottom: 2px;
+	}
+
+	.session-card.compact .stats-row {
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 2px;
+	}
+
+	.session-card.compact .status-label {
+		font-size: 10px;
+		margin-top: 0;
+	}
+
+	.session-card.compact .stats-row {
+		justify-content: flex-start;
+		gap: var(--space-md);
+	}
+
+	.compact-actions {
+		position: absolute;
+		right: var(--space-md);
+		top: 50%;
+		transform: translateY(-50%);
+	}
+
+	.compact-actions .action-btn {
 		background: transparent;
-		color: var(--status-input);
+		border-color: transparent;
 	}
 
-	.send-button:disabled {
-		opacity: 0.3;
-		cursor: not-allowed;
+	.compact-actions .action-btn:hover {
+		background: var(--bg-elevated);
+		border-color: var(--border-default);
+		color: var(--text-primary);
 	}
+
+	.action-btn.icon-only {
+		padding: 0;
+		width: 28px;
+		height: 28px;
+		justify-content: center;
+		border-radius: 4px;
+	}
+
 </style>

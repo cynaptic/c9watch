@@ -1,11 +1,13 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { get } from 'svelte/store';
 	import { sortedSessions, statusSummary, sessions as sessionsStore, initializeSessionListeners } from '$lib/stores/sessions';
-	import { approveSession, openSession, getSessions } from '$lib/api';
+	import { openSession, getSessions } from '$lib/api';
 	import { SessionStatus } from '$lib/types';
 	import type { Session } from '$lib/types';
 	import { invoke } from '@tauri-apps/api/core';
 	import { listen } from '@tauri-apps/api/event';
+	import { isDemoMode, loadDemoDataIfActive } from '$lib/demo';
 
 	let sessions = $derived($sortedSessions);
 	let summary = $derived($statusSummary);
@@ -14,21 +16,23 @@
 	let unlistenFocus: (() => void) | null = null;
 
 	onMount(() => {
-		// Set up event listeners and fetch data
 		const init = async () => {
-			// Set up event listeners for this window
+			const demoActive = loadDemoDataIfActive();
+
 			await initializeSessionListeners();
 
-			// Fetch initial data
-			try {
-				const initialSessions = await getSessions();
-				sessionsStore.set(initialSessions);
-			} catch (error) {
-				console.error('Failed to fetch sessions:', error);
+			if (!demoActive) {
+				try {
+					const initialSessions = await getSessions();
+					sessionsStore.set(initialSessions);
+				} catch (error) {
+					console.error('Failed to fetch sessions:', error);
+				}
 			}
 
-			// Also refresh when window becomes visible
+			// Refresh when window becomes visible (skip in demo mode)
 			unlistenFocus = await listen('tauri://focus', async () => {
+				if (get(isDemoMode)) return;
 				try {
 					const freshSessions = await getSessions();
 					sessionsStore.set(freshSessions);
@@ -55,14 +59,6 @@
 			.slice(0, 5)
 	);
 
-	async function handleApprove(session: Session) {
-		try {
-			await approveSession(session.pid, session.projectPath);
-		} catch (error) {
-			console.error('Failed to approve:', error);
-		}
-	}
-
 	async function handleOpen(session: Session) {
 		try {
 			await openSession(session.pid, session.projectPath);
@@ -88,7 +84,7 @@
 			case SessionStatus.Working:
 				return 'var(--status-working)';
 			default:
-				return 'var(--status-connecting)';
+				return 'var(--status-working)';
 		}
 	}
 
@@ -101,7 +97,7 @@
 			case SessionStatus.Working:
 				return 'Working';
 			default:
-				return 'Connecting';
+				return 'Working';
 		}
 	}
 </script>
@@ -148,13 +144,6 @@
 							</div>
 						</div>
 						<div class="session-actions">
-							{#if session.status === SessionStatus.NeedsPermission}
-								<button class="action-btn approve" onclick={() => handleApprove(session)} title="Approve">
-									<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-										<polyline points="20 6 9 17 4 12" />
-									</svg>
-								</button>
-							{/if}
 							<button class="action-btn open" onclick={() => handleOpen(session)} title="Open">
 								<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
 									<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />

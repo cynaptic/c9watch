@@ -20,7 +20,7 @@
 			case SessionStatus.WaitingForInput:
 				return '#22c55e'; // green
 			case SessionStatus.Connecting:
-				return '#9ca3af'; // gray
+				return '#3b82f6'; // blue (same as working)
 			default:
 				return '#9ca3af';
 		}
@@ -63,7 +63,7 @@
 			{/if}
 			<span class="time-since">{formatTimeSince(session.modified)}</span>
 		</div>
-		<div class="first-prompt">{truncatePrompt(session.firstPrompt)}</div>
+		<div class="first-prompt">{truncatePrompt(session.summary || session.firstPrompt)}</div>
 		<div class="message-count">{session.messageCount} messages</div>
 	</div>
 </button>
