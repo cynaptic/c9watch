@@ -149,6 +149,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             // Start the polling loop when the app starts
             start_polling(app.handle().clone());

@@ -1,16 +1,20 @@
 use crate::session::{
-    determine_status, parse_last_n_entries, parse_sessions_index, SessionDetector, SessionStatus,
+    determine_status, get_pending_tool_name, parse_last_n_entries, parse_sessions_index,
+    SessionDetector, SessionStatus,
 };
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
+use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
+use tauri_plugin_notification::NotificationExt;
 
 /// Combined session information for the frontend
 #[derive(Debug, Clone, Serialize)]
@@ -27,6 +31,7 @@ pub struct Session {
     pub modified: String,
     pub status: SessionStatus,
     pub latest_message: String,
+    pub pending_tool_name: Option<String>,
 }
 
 /// Start the background polling loop
@@ -34,16 +39,83 @@ pub struct Session {
 /// This function spawns a background thread that:
 /// 1. Detects active Claude sessions every 2-3 seconds
 /// 2. Enriches them with status information
-/// 3. Emits "sessions-updated" events to the frontend
+/// 3. Tracks status transitions and fires notifications
+/// 4. Emits "sessions-updated" events to the frontend
 pub fn start_polling(app: AppHandle) {
     thread::spawn(move || {
         let app_handle = Arc::new(app);
         let poll_interval = Duration::from_secs(2);
 
+        // Track previous status for each session
+        let previous_status: Arc<Mutex<HashMap<String, SessionStatus>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
+        // Track if this is the first poll cycle
+        let mut is_first_cycle = true;
+
         loop {
             // Detect and enrich sessions
             match detect_and_enrich_sessions() {
                 Ok(sessions) => {
+                    // Track current session IDs to clean up stale entries
+                    let current_session_ids: HashSet<String> =
+                        sessions.iter().map(|s| s.id.clone()).collect();
+
+                    // Process status transitions and fire notifications
+                    match previous_status.lock() {
+                        Ok(mut prev_status_map) => {
+                            if is_first_cycle {
+                                // First cycle: seed the map without notifications
+                                for session in &sessions {
+                                    prev_status_map.insert(session.id.clone(), session.status.clone());
+                                }
+                                is_first_cycle = false;
+                            } else {
+                                // Check for status transitions
+                                for session in &sessions {
+                                    if let Some(prev_status) = prev_status_map.get(&session.id) {
+                                        // Check for notification-worthy transitions
+                                        let should_notify = match (prev_status, &session.status) {
+                                            (SessionStatus::Working, SessionStatus::NeedsPermission) => true,
+                                            (SessionStatus::Working, SessionStatus::WaitingForInput) => true,
+                                            _ => false,
+                                        };
+
+                                        if should_notify {
+                                            fire_notification(
+                                                &app_handle,
+                                                &session.id,
+                                                &session.first_prompt,
+                                                &session.project_name,
+                                                &session.status,
+                                                session.pending_tool_name.as_deref(),
+                                                session.pid,
+                                                &session.project_path,
+                                            );
+                                        }
+                                    }
+
+                                    // Update the status map
+                                    prev_status_map.insert(session.id.clone(), session.status.clone());
+                                }
+                            }
+
+                            // Clean up disappeared sessions
+                            prev_status_map.retain(|id, _| current_session_ids.contains(id));
+                        }
+                        Err(poisoned) => {
+                            eprintln!("[polling] Mutex poisoned, recovering...");
+                            let mut prev_status_map = poisoned.into_inner();
+                            prev_status_map.clear(); // Clear stale state
+
+                            // Seed the map with current sessions (no notifications after recovery)
+                            for session in &sessions {
+                                prev_status_map.insert(session.id.clone(), session.status.clone());
+                            }
+                            is_first_cycle = false; // Mark as initialized
+                        }
+                    }
+
                     // Emit event to frontend
                     if let Err(e) = app_handle.emit("sessions-updated", &sessions) {
                         eprintln!("Failed to emit sessions-updated event: {}", e);
@@ -150,6 +222,7 @@ pub fn detect_and_enrich_sessions() -> Result<Vec<Session>, String> {
         };
 
         let latest_message = get_latest_message_from_entries(&entries);
+        let pending_tool_name = get_pending_tool_name(&entries);
 
         // Skip empty sessions (0 messages) - these are likely sessions where user
         // immediately used /resume to switch to a different session
@@ -175,6 +248,7 @@ pub fn detect_and_enrich_sessions() -> Result<Vec<Session>, String> {
             modified,
             status,
             latest_message,
+            pending_tool_name,
         });
     }
 
@@ -288,6 +362,74 @@ fn count_messages_in_jsonl(path: &Path) -> u32 {
     }
 
     count
+}
+
+/// Notification metadata for click-to-focus
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NotificationMetadata {
+    notification_id: i32,
+    session_id: String,
+    pid: u32,
+    project_path: String,
+    title: String,
+}
+
+/// Fire a notification for a status transition
+fn fire_notification(
+    app_handle: &AppHandle,
+    session_id: &str,
+    first_prompt: &str,
+    project_name: &str,
+    status: &SessionStatus,
+    pending_tool_name: Option<&str>,
+    pid: u32,
+    project_path: &str,
+) {
+    // Truncate title to 60 characters
+    let title = truncate_string(first_prompt, 60);
+
+    // Build the body based on the status
+    let body = match status {
+        SessionStatus::NeedsPermission => {
+            let tool_name = pending_tool_name.unwrap_or("unknown tool");
+            format!("{}: Needs permission for {}", project_name, tool_name)
+        }
+        SessionStatus::WaitingForInput => {
+            format!("{}: Finished working", project_name)
+        }
+        _ => return, // Should not happen based on the caller's logic
+    };
+
+    // Generate a stable i32 ID from the session_id string using hash
+    let mut hasher = DefaultHasher::new();
+    session_id.hash(&mut hasher);
+    let notification_id = (hasher.finish() as i32).abs();
+
+    // Fire native notification via Tauri plugin
+    // Note: Notifications work in production builds (.app) but may not appear in dev mode
+    if let Err(e) = app_handle
+        .notification()
+        .builder()
+        .title(&title)
+        .body(&body)
+        .show()
+    {
+        eprintln!("[notification] Failed to show notification: {}", e);
+    }
+
+    // Emit event with session metadata for click-to-focus handling
+    let metadata = NotificationMetadata {
+        notification_id,
+        session_id: session_id.to_string(),
+        pid,
+        project_path: project_path.to_string(),
+        title: title.clone(),
+    };
+
+    if let Err(e) = app_handle.emit("notification-fired", &metadata) {
+        eprintln!("Failed to emit notification-fired event: {}", e);
+    }
 }
 
 #[cfg(test)]

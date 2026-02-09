@@ -48,6 +48,9 @@ export interface Session {
 
   /** Content of the latest message */
   latestMessage: string;
+
+  /** Name of the tool currently awaiting user permission (if status is NeedsPermission) */
+  pendingToolName: string | null;
 }
 
 /**

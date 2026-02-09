@@ -4,9 +4,11 @@
 
 import { writable, derived, get } from 'svelte/store';
 import { listen } from '@tauri-apps/api/event';
+import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notification';
 import type { Session, Conversation } from '../types';
 import { SessionStatus } from '../types';
 import { isDemoMode } from '../demo';
+import { openSession } from '../api';
 
 /**
  * Store containing all active sessions
@@ -22,6 +24,11 @@ export const expandedSessionId = writable<string | null>(null);
  * Store containing the conversation for the currently expanded session
  */
 export const currentConversation = writable<Conversation | null>(null);
+
+/**
+ * Store for notification permission status
+ */
+export const notificationPermission = writable<'granted' | 'denied' | 'default'>('default');
 
 /**
  * Derived store: sessions sorted by attention priority
@@ -67,6 +74,24 @@ export const statusSummary = derived(sessions, ($sessions) => {
 });
 
 /**
+ * Notification metadata for click-to-focus
+ */
+interface NotificationMetadata {
+	notificationId: number;
+	sessionId: string;
+	pid: number;
+	projectPath: string;
+	title: string;
+}
+
+/**
+ * Map of notification ID to metadata for click-to-focus
+ * When a notification is clicked, we look up the metadata by notification.id
+ */
+const notificationMetadataMap = new Map<number, NotificationMetadata>();
+const MAX_NOTIFICATION_ENTRIES = 10;
+
+/**
  * Initialize event listeners for backend updates
  * Call this once when the app starts
  */
@@ -82,6 +107,61 @@ export async function initializeSessionListeners() {
 	await listen<Conversation>('conversation-updated', (event) => {
 		currentConversation.set(event.payload);
 	});
+
+	// Listen for notification-fired events to track metadata for click-to-focus
+	await listen<NotificationMetadata>('notification-fired', (event) => {
+		if (!get(isDemoMode)) {
+			const metadata = event.payload;
+
+			// Store in map keyed by notification ID
+			notificationMetadataMap.set(metadata.notificationId, metadata);
+
+			// Keep only the most recent N notifications (remove oldest entries)
+			while (notificationMetadataMap.size > MAX_NOTIFICATION_ENTRIES) {
+				const firstKey = notificationMetadataMap.keys().next().value;
+				if (firstKey !== undefined) {
+					notificationMetadataMap.delete(firstKey);
+				}
+			}
+		}
+	});
+
+	// Note: onNotificationReceived is not supported in Tauri v2 for macOS
+	// Click-to-focus functionality would need to be implemented differently
+	// For now, notifications will show but clicking won't focus the window
+	// TODO: Investigate alternative approaches for notification click handling on macOS
+}
+
+/**
+ * Check if notification permission is granted
+ * Updates the notificationPermission store
+ */
+export async function checkNotificationPermission() {
+	try {
+		const granted = await isPermissionGranted();
+		notificationPermission.set(granted ? 'granted' : 'default');
+		return granted;
+	} catch (error) {
+		console.error('[notification] Failed to check permission:', error);
+		notificationPermission.set('default');
+		return false;
+	}
+}
+
+/**
+ * Request notification permission from the user
+ * Updates the notificationPermission store with the result
+ */
+export async function requestNotificationPermission() {
+	try {
+		const permission = await requestPermission();
+		notificationPermission.set(permission);
+		return permission === 'granted';
+	} catch (error) {
+		console.error('[notification] Failed to request permission:', error);
+		notificationPermission.set('denied');
+		return false;
+	}
 }
 
 // Legacy alias for backward compatibility

@@ -11,4 +11,6 @@ pub use parser::{
     MessageContent, MessageType, SessionEntry, SessionIndexEntry, SessionsIndex,
 };
 pub use permissions::PermissionChecker;
-pub use status::{determine_status, determine_status_with_context, SessionStatus};
+pub use status::{
+    determine_status, determine_status_with_context, get_pending_tool_name, SessionStatus,
+};

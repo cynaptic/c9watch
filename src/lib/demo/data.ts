@@ -83,7 +83,8 @@ export function getDemoSessions(): Session[] {
 			messageCount: 34,
 			modified: minutesAgo(2),
 			status: SessionStatus.NeedsPermission,
-			latestMessage: 'I need to write to src/auth/providers.ts — may I proceed?'
+			latestMessage: 'I need to write to src/auth/providers.ts — may I proceed?',
+			pendingToolName: 'Write'
 		},
 		{
 			id: 'demo-2',
@@ -96,7 +97,8 @@ export function getDemoSessions(): Session[] {
 			messageCount: 87,
 			modified: minutesAgo(5),
 			status: SessionStatus.Working,
-			latestMessage: 'Running the profiler on the VirtualizedTable component to identify the bottleneck...'
+			latestMessage: 'Running the profiler on the VirtualizedTable component to identify the bottleneck...',
+			pendingToolName: null
 		},
 
 		// Project 2: api-server — NeedsPermission + Working
@@ -111,7 +113,8 @@ export function getDemoSessions(): Session[] {
 			messageCount: 21,
 			modified: minutesAgo(1),
 			status: SessionStatus.NeedsPermission,
-			latestMessage: 'I need to run `npm install ioredis` — allow?'
+			latestMessage: 'I need to run `npm install ioredis` — allow?',
+			pendingToolName: 'Bash'
 		},
 		{
 			id: 'demo-4',
@@ -124,7 +127,8 @@ export function getDemoSessions(): Session[] {
 			messageCount: 156,
 			modified: minutesAgo(8),
 			status: SessionStatus.Working,
-			latestMessage: 'Writing test case for subscription renewal webhook with idempotency check...'
+			latestMessage: 'Writing test case for subscription renewal webhook with idempotency check...',
+			pendingToolName: null
 		},
 
 		// Project 3: cli-tools — WaitingForInput x2
@@ -139,7 +143,8 @@ export function getDemoSessions(): Session[] {
 			messageCount: 42,
 			modified: minutesAgo(15),
 			status: SessionStatus.WaitingForInput,
-			latestMessage: 'Done! The wizard is at src/commands/init.ts. Run `cli-tools init` to try it.'
+			latestMessage: 'Done! The wizard is at src/commands/init.ts. Run `cli-tools init` to try it.',
+			pendingToolName: null
 		},
 		{
 			id: 'demo-6',
@@ -152,7 +157,8 @@ export function getDemoSessions(): Session[] {
 			messageCount: 63,
 			modified: minutesAgo(60),
 			status: SessionStatus.WaitingForInput,
-			latestMessage: 'All 14 command handlers have been migrated to the Result pattern. Tests pass.'
+			latestMessage: 'All 14 command handlers have been migrated to the Result pattern. Tests pass.',
+			pendingToolName: null
 		}
 	];
 }

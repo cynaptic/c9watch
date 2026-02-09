@@ -226,6 +226,65 @@ fn are_pending_tools_auto_approved(content: &[MessageContent]) -> bool {
     true
 }
 
+/// Gets the name of the first pending tool that needs permission
+///
+/// This function finds the last assistant message in the entries slice,
+/// and returns the name of the first tool use that:
+/// - Has no corresponding tool result (is pending)
+/// - Is not auto-approved (needs permission)
+///
+/// # Arguments
+/// * `entries` - Session entries to search through
+///
+/// # Returns
+/// The name of the first pending tool that needs permission, or None if:
+/// - No assistant messages found
+/// - No pending tools found
+/// - All pending tools are auto-approved
+pub fn get_pending_tool_name(entries: &[SessionEntry]) -> Option<String> {
+    // Find the last assistant message entry
+    let last_assistant = entries.iter().rev().find_map(|entry| {
+        if let SessionEntry::Assistant { message, .. } = entry {
+            Some(message)
+        } else {
+            None
+        }
+    })?;
+
+    let checker = get_permission_checker();
+
+    // Get IDs of tools that have results
+    let completed_ids: Vec<&str> = last_assistant.content
+        .iter()
+        .filter_map(|c| {
+            if let MessageContent::ToolResult { tool_use_id, .. } = c {
+                Some(tool_use_id.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Find the first pending tool that needs permission
+    for item in &last_assistant.content {
+        if let MessageContent::ToolUse { id, name, input } = item {
+            // Skip if already completed
+            if completed_ids.contains(&id.as_str()) {
+                continue;
+            }
+
+            // This tool is pending - check if it needs permission
+            if !checker.is_auto_approved(name, input) {
+                // Found a tool that needs permission
+                return Some(name.clone());
+            }
+        }
+    }
+
+    // No pending tools need permission
+    None
+}
+
 /// Checks if there are any pending (incomplete) tool uses
 fn has_pending_tool_uses(content: &[MessageContent]) -> bool {
     !check_all_tools_completed(content)
@@ -757,5 +816,203 @@ mod tests {
             }
         ];
         assert_eq!(determine_status(&entries), SessionStatus::WaitingForInput);
+    }
+
+    #[test]
+    fn test_get_pending_tool_name_needs_permission() {
+        // Bash command that needs permission
+        let entries = vec![
+            SessionEntry::Assistant {
+                base: create_base(),
+                message: AssistantMessage {
+                    model: "claude-opus-4-5-20251101".to_string(),
+                    id: "msg_test".to_string(),
+                    role: "assistant".to_string(),
+                    content: vec![
+                        MessageContent::ToolUse {
+                            id: "toolu_123".to_string(),
+                            name: "Bash".to_string(),
+                            input: serde_json::json!({"command": "rm -rf /some/path"}),
+                        }
+                    ],
+                    stop_reason: Some("tool_use".to_string()),
+                    stop_sequence: None,
+                    usage: None,
+                },
+            }
+        ];
+        assert_eq!(get_pending_tool_name(&entries), Some("Bash".to_string()));
+    }
+
+    #[test]
+    fn test_get_pending_tool_name_auto_approved() {
+        // Read is auto-approved, should return None
+        let entries = vec![
+            SessionEntry::Assistant {
+                base: create_base(),
+                message: AssistantMessage {
+                    model: "claude-opus-4-5-20251101".to_string(),
+                    id: "msg_test".to_string(),
+                    role: "assistant".to_string(),
+                    content: vec![
+                        MessageContent::ToolUse {
+                            id: "toolu_123".to_string(),
+                            name: "Read".to_string(),
+                            input: serde_json::json!({"file_path": "/test/file.txt"}),
+                        }
+                    ],
+                    stop_reason: Some("tool_use".to_string()),
+                    stop_sequence: None,
+                    usage: None,
+                },
+            }
+        ];
+        assert_eq!(get_pending_tool_name(&entries), None);
+    }
+
+    #[test]
+    fn test_get_pending_tool_name_no_tools() {
+        // No tools in the message
+        let entries = vec![
+            SessionEntry::Assistant {
+                base: create_base(),
+                message: AssistantMessage {
+                    model: "claude-opus-4-5-20251101".to_string(),
+                    id: "msg_test".to_string(),
+                    role: "assistant".to_string(),
+                    content: vec![
+                        MessageContent::Text {
+                            text: "Just text, no tools".to_string(),
+                        }
+                    ],
+                    stop_reason: Some("end_turn".to_string()),
+                    stop_sequence: None,
+                    usage: None,
+                },
+            }
+        ];
+        assert_eq!(get_pending_tool_name(&entries), None);
+    }
+
+    #[test]
+    fn test_get_pending_tool_name_all_completed() {
+        // Tool has a result, so not pending
+        let entries = vec![
+            SessionEntry::Assistant {
+                base: create_base(),
+                message: AssistantMessage {
+                    model: "claude-opus-4-5-20251101".to_string(),
+                    id: "msg_test".to_string(),
+                    role: "assistant".to_string(),
+                    content: vec![
+                        MessageContent::ToolUse {
+                            id: "toolu_123".to_string(),
+                            name: "Bash".to_string(),
+                            input: serde_json::json!({"command": "ls"}),
+                        },
+                        MessageContent::ToolResult {
+                            tool_use_id: "toolu_123".to_string(),
+                            content: "file1.txt\nfile2.txt".to_string(),
+                            is_error: Some(false),
+                        }
+                    ],
+                    stop_reason: Some("end_turn".to_string()),
+                    stop_sequence: None,
+                    usage: None,
+                },
+            }
+        ];
+        assert_eq!(get_pending_tool_name(&entries), None);
+    }
+
+    #[test]
+    fn test_get_pending_tool_name_multiple_tools_first_needs_permission() {
+        // First tool (Bash) needs permission, second (Read) auto-approved
+        // Should return the first one that needs permission
+        let entries = vec![
+            SessionEntry::Assistant {
+                base: create_base(),
+                message: AssistantMessage {
+                    model: "claude-opus-4-5-20251101".to_string(),
+                    id: "msg_test".to_string(),
+                    role: "assistant".to_string(),
+                    content: vec![
+                        MessageContent::ToolUse {
+                            id: "toolu_123".to_string(),
+                            name: "Bash".to_string(),
+                            input: serde_json::json!({"command": "make build"}),
+                        },
+                        MessageContent::ToolUse {
+                            id: "toolu_456".to_string(),
+                            name: "Read".to_string(),
+                            input: serde_json::json!({"file_path": "/test/file.txt"}),
+                        }
+                    ],
+                    stop_reason: Some("tool_use".to_string()),
+                    stop_sequence: None,
+                    usage: None,
+                },
+            }
+        ];
+        assert_eq!(get_pending_tool_name(&entries), Some("Bash".to_string()));
+    }
+
+    #[test]
+    fn test_get_pending_tool_name_no_assistant_message() {
+        // Only user message, no assistant message
+        let entries = vec![
+            SessionEntry::User {
+                base: create_base(),
+                message: UserMessage {
+                    role: "user".to_string(),
+                    content: "Hello".to_string(),
+                    is_tool_result: false,
+                },
+            }
+        ];
+        assert_eq!(get_pending_tool_name(&entries), None);
+    }
+
+    #[test]
+    fn test_get_pending_tool_name_empty_entries() {
+        // Empty entries
+        let entries: Vec<SessionEntry> = vec![];
+        assert_eq!(get_pending_tool_name(&entries), None);
+    }
+
+    #[test]
+    fn test_get_pending_tool_name_mixed_completed_and_pending() {
+        // First tool completed, second tool needs permission
+        let entries = vec![
+            SessionEntry::Assistant {
+                base: create_base(),
+                message: AssistantMessage {
+                    model: "claude-opus-4-5-20251101".to_string(),
+                    id: "msg_test".to_string(),
+                    role: "assistant".to_string(),
+                    content: vec![
+                        MessageContent::ToolUse {
+                            id: "toolu_123".to_string(),
+                            name: "Read".to_string(),
+                            input: serde_json::json!({"file_path": "/test/file.txt"}),
+                        },
+                        MessageContent::ToolResult {
+                            tool_use_id: "toolu_123".to_string(),
+                            content: "file content".to_string(),
+                            is_error: Some(false),
+                        },
+                        MessageContent::ToolUse {
+                            id: "toolu_456".to_string(),
+                            name: "Bash".to_string(),
+                            input: serde_json::json!({"command": "npm install"}),
+                        }
+                    ],
+                    stop_reason: Some("tool_use".to_string()),
+                    stop_sequence: None,
+                    usage: None,
+                },
+            }
+        ];
+        assert_eq!(get_pending_tool_name(&entries), Some("Bash".to_string()));
     }
 }
