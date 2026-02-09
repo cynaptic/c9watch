@@ -75,7 +75,8 @@ export function getDemoSessions(): Session[] {
 		{
 			id: 'demo-1',
 			pid: 90001,
-			projectName: 'web-app',
+			sessionName: 'web-app',
+			customTitle: null,
 			projectPath: '/Users/demo/projects/web-app',
 			gitBranch: 'feat/auth-flow',
 			firstPrompt: 'Add OAuth2 login with Google and GitHub providers',
@@ -89,7 +90,8 @@ export function getDemoSessions(): Session[] {
 		{
 			id: 'demo-2',
 			pid: 90002,
-			projectName: 'web-app',
+			sessionName: 'web-app',
+			customTitle: null,
 			projectPath: '/Users/demo/projects/web-app',
 			gitBranch: 'fix/perf-regression',
 			firstPrompt: 'Profile and fix the rendering performance regression in the dashboard',
@@ -105,7 +107,8 @@ export function getDemoSessions(): Session[] {
 		{
 			id: 'demo-3',
 			pid: 90003,
-			projectName: 'api-server',
+			sessionName: 'api-server',
+			customTitle: null,
 			projectPath: '/Users/demo/projects/api-server',
 			gitBranch: 'feat/rate-limiting',
 			firstPrompt: 'Implement token-bucket rate limiting middleware',
@@ -119,7 +122,8 @@ export function getDemoSessions(): Session[] {
 		{
 			id: 'demo-4',
 			pid: 90004,
-			projectName: 'api-server',
+			sessionName: 'api-server',
+			customTitle: null,
 			projectPath: '/Users/demo/projects/api-server',
 			gitBranch: 'main',
 			firstPrompt: 'Write integration tests for the payments webhook handler',
@@ -135,7 +139,8 @@ export function getDemoSessions(): Session[] {
 		{
 			id: 'demo-5',
 			pid: 90005,
-			projectName: 'cli-tools',
+			sessionName: 'cli-tools',
+			customTitle: null,
 			projectPath: '/Users/demo/projects/cli-tools',
 			gitBranch: 'feat/config-wizard',
 			firstPrompt: 'Build an interactive configuration wizard for first-time setup',
@@ -149,7 +154,8 @@ export function getDemoSessions(): Session[] {
 		{
 			id: 'demo-6',
 			pid: 90006,
-			projectName: 'cli-tools',
+			sessionName: 'cli-tools',
+			customTitle: null,
 			projectPath: '/Users/demo/projects/cli-tools',
 			gitBranch: 'refactor/error-handling',
 			firstPrompt: 'Refactor error handling to use typed Result pattern',

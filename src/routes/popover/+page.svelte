@@ -134,7 +134,7 @@
 				{#each prioritySessions as session (session.id)}
 					<div class="session-item" style="--status-color: {getStatusColor(session.status)}">
 						<div class="session-info">
-							<div class="session-project">{session.projectName}</div>
+							<div class="session-project">{session.sessionName}</div>
 							<div class="session-prompt">{session.firstPrompt}</div>
 							<div class="session-meta">
 								<span class="status-badge">{getStatusLabel(session.status)}</span>

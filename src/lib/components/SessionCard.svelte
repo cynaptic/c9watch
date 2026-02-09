@@ -23,10 +23,10 @@
 	let isWaitingInput = $derived(session.status === SessionStatus.WaitingForInput);
 	let isWorking = $derived(session.status === SessionStatus.Working);
 
-	let isEditingName = $state(false);
-	let tempName = $state(session.projectName);
+	let isEditingTitle = $state(false);
+	let tempTitle = $state(session.customTitle || session.summary || session.firstPrompt);
 
-	let cardTitle = $derived(session.summary || session.firstPrompt);
+	let cardTitle = $derived(session.customTitle || session.summary || session.firstPrompt);
 
 	function getStatusColor(): string {
 		switch (session.status) {
@@ -105,31 +105,32 @@
 		onopen?.();
 	}
 
-	async function saveName() {
-		if (tempName.trim() && tempName !== session.projectName) {
+	async function saveTitle() {
+		const currentTitle = session.customTitle || session.summary || session.firstPrompt;
+		if (tempTitle.trim() && tempTitle !== currentTitle) {
 			try {
-				await invoke('rename_session', { sessionId: session.id, newName: tempName.trim() });
+				await invoke('rename_session', { sessionId: session.id, newName: tempTitle.trim() });
 			} catch (err) {
 				console.error('Failed to rename session:', err);
-				tempName = session.projectName;
+				tempTitle = currentTitle;
 			}
 		}
-		isEditingName = false;
+		isEditingTitle = false;
 	}
 
-	function handleNameKeydown(e: KeyboardEvent) {
+	function handleTitleKeydown(e: KeyboardEvent) {
 		if (e.key === 'Enter') {
-			saveName();
+			saveTitle();
 		} else if (e.key === 'Escape') {
-			tempName = session.projectName;
-			isEditingName = false;
+			tempTitle = session.customTitle || session.summary || session.firstPrompt;
+			isEditingTitle = false;
 		}
 	}
 
 	function startEditing(e?: MouseEvent) {
 		e?.stopPropagation();
-		tempName = session.projectName;
-		isEditingName = true;
+		tempTitle = session.customTitle || session.summary || session.firstPrompt;
+		isEditingTitle = true;
 	}
 
 	function autofocus(node: HTMLElement) {
@@ -156,24 +157,24 @@
 	<div class="card-body">
 		<!-- Header (Summary as Title) -->
 		<div class="card-header">
-			<h3 class="card-main-title">{cardTitle}</h3>
-		</div>
-
-		<!-- Project & Stats Row -->
-		<div class="stats-row">
-			{#if isEditingName}
+			{#if isEditingTitle}
 				<input
 					type="text"
-					class="project-name-input"
-					bind:value={tempName}
-					onkeydown={handleNameKeydown}
-					onblur={saveName}
+					class="title-input"
+					bind:value={tempTitle}
+					onkeydown={handleTitleKeydown}
+					onblur={saveTitle}
 					use:autofocus
 					onclick={(e) => e.stopPropagation()}
 				/>
 			{:else}
-				<span class="project-badge" ondblclick={() => startEditing()}>{session.projectName}</span>
+				<h3 class="card-main-title" ondblclick={() => startEditing()}>{cardTitle}</h3>
 			{/if}
+		</div>
+
+		<!-- Project & Stats Row -->
+		<div class="stats-row">
+			<span class="session-name-badge">{session.sessionName}</span>
 			
 			{#if !compact}
 				<div class="stats-group">
@@ -309,9 +310,25 @@
 		-webkit-line-clamp: 2;
 		line-clamp: 2;
 		-webkit-box-orient: vertical;
+		cursor: text;
 	}
 
-	.project-badge {
+	.title-input {
+		font-family: var(--font-pixel);
+		font-size: 15px;
+		font-weight: 600;
+		color: var(--text-primary);
+		background: var(--bg-base);
+		border: 1px solid var(--status-input);
+		padding: 4px 8px;
+		margin: -4px -8px;
+		letter-spacing: 0.05em;
+		text-transform: uppercase;
+		width: 100%;
+		outline: none;
+	}
+
+	.session-name-badge {
 		font-family: var(--font-mono);
 		font-size: 11px;
 		font-weight: 500;
@@ -489,7 +506,7 @@
 		align-items: center;
 	}
 
-	.session-card.compact .project-badge {
+	.session-card.compact .session-name-badge {
 		max-width: 150px;
 	}
 

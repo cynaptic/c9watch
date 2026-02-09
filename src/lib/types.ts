@@ -22,8 +22,11 @@ export interface Session {
   /** Process ID of the running Claude instance */
   pid: number;
 
-  /** Project directory name */
-  projectName: string;
+  /** Custom session name (defaults to project directory name) - shown as small badge */
+  sessionName: string;
+
+  /** Custom title override for the session - if set, shown instead of summary/firstPrompt */
+  customTitle: string | null;
 
   /** Full path to project directory */
   projectPath: string;

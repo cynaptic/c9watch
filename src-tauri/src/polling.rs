@@ -22,7 +22,8 @@ use tauri_plugin_notification::NotificationExt;
 pub struct Session {
     pub id: String,
     pub pid: u32,
-    pub project_name: String,
+    pub session_name: String,
+    pub custom_title: Option<String>,
     pub project_path: String,
     pub git_branch: Option<String>,
     pub first_prompt: String,
@@ -86,7 +87,7 @@ pub fn start_polling(app: AppHandle) {
                                                 &app_handle,
                                                 &session.id,
                                                 &session.first_prompt,
-                                                &session.project_name,
+                                                &session.session_name,
                                                 &session.status,
                                                 session.pending_tool_name.as_deref(),
                                                 session.pid,
@@ -142,6 +143,7 @@ pub fn detect_and_enrich_sessions() -> Result<Vec<Session>, String> {
         .map_err(|e| format!("Failed to detect sessions: {}", e))?;
 
     let custom_names = crate::session::CustomNames::load();
+    let custom_titles = crate::session::CustomTitles::load();
     let mut sessions = Vec::new();
     let mut seen_ids: HashSet<String> = HashSet::new();
 
@@ -231,15 +233,19 @@ pub fn detect_and_enrich_sessions() -> Result<Vec<Session>, String> {
         }
 
         // Use custom name if available, otherwise use detected project name
-        let project_name = custom_names
+        let session_name = custom_names
             .get(&session_id)
             .cloned()
             .unwrap_or(detected.project_name);
 
+        // Get custom title if available
+        let custom_title = custom_titles.get(&session_id).cloned();
+
         sessions.push(Session {
             id: session_id,
             pid: detected.pid,
-            project_name,
+            session_name,
+            custom_title,
             project_path: detected.cwd.to_string_lossy().to_string(),
             git_branch,
             first_prompt,
@@ -380,7 +386,7 @@ fn fire_notification(
     app_handle: &AppHandle,
     session_id: &str,
     first_prompt: &str,
-    project_name: &str,
+    session_name: &str,
     status: &SessionStatus,
     pending_tool_name: Option<&str>,
     pid: u32,
@@ -393,10 +399,10 @@ fn fire_notification(
     let body = match status {
         SessionStatus::NeedsPermission => {
             let tool_name = pending_tool_name.unwrap_or("unknown tool");
-            format!("{}: Needs permission for {}", project_name, tool_name)
+            format!("{}: Needs permission for {}", session_name, tool_name)
         }
         SessionStatus::WaitingForInput => {
-            format!("{}: Finished working", project_name)
+            format!("{}: Finished working", session_name)
         }
         _ => return, // Should not happen based on the caller's logic
     };
@@ -445,7 +451,7 @@ mod tests {
                 for session in sessions {
                     println!(
                         "Session: {} - {} (PID: {}, Status: {:?})",
-                        session.id, session.project_name, session.pid, session.status
+                        session.id, session.session_name, session.pid, session.status
                     );
                 }
             }

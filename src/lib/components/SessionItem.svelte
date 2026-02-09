@@ -57,7 +57,7 @@
 	<div class="status-indicator" style="background-color: {getStatusColor(session.status)}"></div>
 	<div class="session-content">
 		<div class="session-header">
-			<span class="project-name">{session.projectName}</span>
+			<span class="session-name">{session.sessionName}</span>
 			{#if session.gitBranch}
 				<span class="git-branch">({session.gitBranch})</span>
 			{/if}
@@ -116,7 +116,7 @@
 		font-size: 14px;
 	}
 
-	.project-name {
+	.session-name {
 		font-weight: 600;
 		color: #111827;
 	}

@@ -134,7 +134,7 @@
 						<div class="header-meta">
 							<span class="status-label" style="color: {getStatusColor()}">{getStatusLabel()}</span>
 							<span class="separator">·</span>
-							<span class="project-badge">{session.projectName}</span>
+							<span class="session-name-badge">{session.sessionName}</span>
 							<span class="separator">·</span>
 							<span class="message-count">{conversation?.messages.length ?? 0} messages</span>
 							{#if session.gitBranch}
@@ -331,7 +331,7 @@
 		max-width: 500px;
 	}
 
-	.project-badge {
+	.session-name-badge {
 		font-family: var(--font-mono);
 		font-size: 11px;
 		font-weight: 500;

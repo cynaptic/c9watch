@@ -96,12 +96,12 @@ async fn open_session(pid: u32, project_path: String) -> Result<(), String> {
     open_session_action(pid, project_path)
 }
 
-/// Rename a session
+/// Rename a session title
 #[tauri::command]
 async fn rename_session(app: AppHandle, session_id: String, new_name: String) -> Result<(), String> {
-    let mut custom_names = session::CustomNames::load();
-    custom_names.set(session_id, new_name);
-    custom_names.save()?;
+    let mut custom_titles = session::CustomTitles::load();
+    custom_titles.set(session_id, new_name);
+    custom_titles.save()?;
 
     // Emit updated sessions immediately
     if let Ok(sessions) = detect_and_enrich_sessions() {
