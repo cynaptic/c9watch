@@ -24,7 +24,7 @@
 	let isWorking = $derived(session.status === SessionStatus.Working);
 
 	let isEditingTitle = $state(false);
-	let tempTitle = $state(session.customTitle || session.summary || session.firstPrompt);
+	let tempTitle = $state('');
 
 	let cardTitle = $derived(session.customTitle || session.summary || session.firstPrompt);
 
@@ -346,22 +346,6 @@
 		max-width: 100%;
 	}
 
-	.project-name-input {
-		font-family: var(--font-pixel);
-		font-size: 14px;
-		font-weight: 500;
-		color: var(--text-primary);
-		background: var(--bg-base);
-		border: 1px solid var(--status-input);
-		padding: 2px 4px;
-		margin: -3px -5px;
-		letter-spacing: 0.05em;
-		text-transform: uppercase;
-		flex: 1;
-		min-width: 0;
-		outline: none;
-	}
-
 	.git-branch {
 		display: flex;
 		align-items: center;
@@ -563,6 +547,25 @@
 		height: 28px;
 		justify-content: center;
 		border-radius: 4px;
+	}
+
+	/* ── Mobile Responsive ─────────────────────────────────────── */
+	@media (max-width: 768px) {
+		.session-card {
+			height: auto;
+			min-height: auto;
+			padding: var(--space-md);
+		}
+
+		.card-main-title {
+			font-size: 13px;
+		}
+
+		.task-preview {
+			font-size: 13px;
+			-webkit-line-clamp: 2;
+			line-clamp: 2;
+		}
 	}
 
 </style>
