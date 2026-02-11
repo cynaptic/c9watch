@@ -11,7 +11,7 @@
 		statusSummary,
 		checkNotificationPermission
 	} from '$lib/stores/sessions';
-	import { getConversation, stopSession, openSession } from '$lib/api';
+	import { getConversation, stopSession, openSession, takeoverSession } from '$lib/api';
 	import { isDemoMode, toggleDemoMode } from '$lib/demo';
 	import { isTauri } from '$lib/ws';
 	import StatusBar from '$lib/components/StatusBar.svelte';
@@ -188,6 +188,14 @@
 			await openSession(pid, projectPath);
 		} catch (error) {
 			console.error('Failed to open session:', error);
+		}
+	}
+
+	async function handleTakeover(pid: number, sessionId: string, projectPath: string) {
+		try {
+			await takeoverSession(pid, sessionId, projectPath);
+		} catch (error) {
+			console.error('Failed to takeover session:', error);
 		}
 	}
 
@@ -375,6 +383,7 @@
 													onexpand={() => handleExpand(session)}
 													onstop={() => handleStop(session.pid)}
 													onopen={() => handleOpen(session.pid, session.projectPath)}
+												ontakeover={() => handleTakeover(session.pid, session.id, session.projectPath)}
 												/>
 											</div>
 										{/each}
@@ -400,6 +409,7 @@
 													onexpand={() => handleExpand(session)}
 													onstop={() => handleStop(session.pid)}
 													onopen={() => handleOpen(session.pid, session.projectPath)}
+												ontakeover={() => handleTakeover(session.pid, session.id, session.projectPath)}
 												/>
 											</div>
 										{/each}
@@ -425,6 +435,7 @@
 													onexpand={() => handleExpand(session)}
 													onstop={() => handleStop(session.pid)}
 													onopen={() => handleOpen(session.pid, session.projectPath)}
+												ontakeover={() => handleTakeover(session.pid, session.id, session.projectPath)}
 												/>
 											</div>
 										{/each}
@@ -456,6 +467,7 @@
 											onexpand={() => handleExpand(session)}
 											onstop={() => handleStop(session.pid)}
 											onopen={() => handleOpen(session.pid, session.projectPath)}
+											ontakeover={() => handleTakeover(session.pid, session.id, session.projectPath)}
 										/>
 									</div>
 								{/each}

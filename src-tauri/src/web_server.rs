@@ -25,6 +25,8 @@ pub const WS_PORT: u16 = 9210;
 pub struct WsState {
     pub auth_token: String,
     pub sessions_tx: broadcast::Sender<String>,
+    pub session_map: crate::pty_writer::SessionMap,
+    pub sdk_bridge: crate::bridge::SdkBridgeHandle,
 }
 
 // ── Protocol types ──────────────────────────────────────────────────
@@ -59,6 +61,32 @@ enum ClientMsg {
         #[serde(rename = "newName")]
         new_name: String,
     },
+
+    #[serde(rename = "takeoverSession")]
+    TakeoverSession {
+        pid: u32,
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        #[serde(rename = "projectPath")]
+        project_path: String,
+    },
+
+    #[serde(rename = "sendInput")]
+    SendInput {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        input: String,
+        #[serde(rename = "projectPath")]
+        project_path: String,
+        #[serde(default)]
+        pid: u32,
+    },
+
+    #[serde(rename = "isSessionManaged")]
+    IsSessionManaged {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+    },
 }
 
 /// Server → Client messages
@@ -79,6 +107,9 @@ enum ServerMsg {
 
     #[serde(rename = "ok")]
     Ok,
+
+    #[serde(rename = "managedStatus")]
+    ManagedStatus { managed: bool },
 }
 
 // ── Server entrypoint ───────────────────────────────────────────────
@@ -183,6 +214,9 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<WsState>) {
     eprintln!("[ws-server] Client connected");
     let mut sessions_rx = state.sessions_tx.subscribe();
 
+    // Subscribe to bridge stream events for this connection
+    let mut bridge_rx = state.sdk_bridge.subscribe();
+
     loop {
         tokio::select! {
             // Incoming client message
@@ -191,7 +225,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<WsState>) {
                     Some(Ok(Message::Text(text))) => {
                         let text_str: &str = &text;
                         let response = match serde_json::from_str::<ClientMsg>(text_str) {
-                            Ok(client_msg) => handle_message(client_msg).await,
+                            Ok(client_msg) => handle_message(client_msg, &state).await,
                             Err(e) => ServerMsg::Error {
                                 message: format!("Invalid message: {}", e),
                             },
@@ -220,6 +254,12 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<WsState>) {
                     break;
                 }
             }
+            // Push streaming events from bridge
+            Ok(event_json) = bridge_rx.recv() => {
+                if socket.send(Message::Text(event_json)).await.is_err() {
+                    break;
+                }
+            }
         }
     }
 
@@ -228,14 +268,20 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<WsState>) {
 
 // ── Message dispatch ────────────────────────────────────────────────
 
-async fn handle_message(msg: ClientMsg) -> ServerMsg {
+async fn handle_message(
+    msg: ClientMsg,
+    state: &Arc<WsState>,
+) -> ServerMsg {
     match msg {
-        ClientMsg::GetSessions => match crate::polling::detect_and_enrich_sessions() {
-            Ok(sessions) => ServerMsg::Sessions {
-                data: serde_json::to_value(&sessions).unwrap_or_default(),
-            },
-            Err(e) => ServerMsg::Error { message: e },
-        },
+        ClientMsg::GetSessions => {
+            let managed = crate::pty_writer::get_managed_sessions(&state.session_map);
+            match crate::polling::detect_and_enrich_sessions_with_managed(&managed) {
+                Ok(sessions) => ServerMsg::Sessions {
+                    data: serde_json::to_value(&sessions).unwrap_or_default(),
+                },
+                Err(e) => ServerMsg::Error { message: e },
+            }
+        }
 
         ClientMsg::GetConversation { session_id } => {
             match crate::get_conversation_data(&session_id) {
@@ -268,6 +314,61 @@ async fn handle_message(msg: ClientMsg) -> ServerMsg {
                 Ok(()) => ServerMsg::Ok,
                 Err(e) => ServerMsg::Error { message: e },
             }
+        }
+
+        ClientMsg::TakeoverSession {
+            pid,
+            session_id,
+            project_path,
+        } => {
+            if pid > 0 {
+                let _ = crate::actions::stop_session(pid);
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            let map = state.session_map.clone();
+            let sid = session_id.clone();
+            let pp = project_path.clone();
+            match tokio::task::spawn_blocking(move || {
+                crate::pty_writer::take_over_session(&map, 0, &sid, &pp)
+            })
+            .await
+            {
+                Ok(Ok(())) => ServerMsg::Ok,
+                Ok(Err(e)) => ServerMsg::Error { message: e },
+                Err(e) => ServerMsg::Error {
+                    message: format!("Task join error: {}", e),
+                },
+            }
+        }
+
+        ClientMsg::SendInput { session_id, input, project_path, pid } => {
+            // Kill original process on first send to avoid branch conflicts
+            if pid > 0 && !crate::pty_writer::is_managed(&state.session_map, &session_id) {
+                let _ = crate::actions::stop_session(pid);
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                let map = state.session_map.clone();
+                let sid = session_id.clone();
+                let pp = project_path.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    let _ = crate::pty_writer::take_over_session(&map, 0, &sid, &pp);
+                }).await;
+            }
+
+            match state.sdk_bridge.send_message(&session_id, &input, &project_path).await {
+                Ok(()) => {
+                    let sid = session_id.clone();
+                    tokio::task::spawn_blocking(move || {
+                        crate::pty_writer::touch_session_file(&sid);
+                    });
+                    ServerMsg::Ok
+                }
+                Err(e) => ServerMsg::Error { message: e },
+            }
+        }
+
+        ClientMsg::IsSessionManaged { session_id } => {
+            let managed = crate::pty_writer::is_managed(&state.session_map, &session_id);
+            ServerMsg::ManagedStatus { managed }
         }
     }
 }

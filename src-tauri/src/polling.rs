@@ -43,7 +43,11 @@ pub struct Session {
 /// 3. Tracks status transitions and fires notifications
 /// 4. Emits "sessions-updated" events to the frontend
 /// 5. Broadcasts session data to WebSocket clients
-pub fn start_polling(app: AppHandle, sessions_tx: tokio::sync::broadcast::Sender<String>) {
+pub fn start_polling(
+    app: AppHandle,
+    sessions_tx: tokio::sync::broadcast::Sender<String>,
+    session_map: crate::pty_writer::SessionMap,
+) {
     thread::spawn(move || {
         let app_handle = Arc::new(app);
         let poll_interval = Duration::from_secs(2);
@@ -56,8 +60,9 @@ pub fn start_polling(app: AppHandle, sessions_tx: tokio::sync::broadcast::Sender
         let mut is_first_cycle = true;
 
         loop {
-            // Detect and enrich sessions
-            match detect_and_enrich_sessions() {
+            // Detect and enrich sessions (including managed ones)
+            let managed = crate::pty_writer::get_managed_sessions(&session_map);
+            match detect_and_enrich_sessions_with_managed(&managed) {
                 Ok(sessions) => {
                     // Track current session IDs to clean up stale entries
                     let current_session_ids: HashSet<String> =
@@ -145,6 +150,129 @@ pub fn start_polling(app: AppHandle, sessions_tx: tokio::sync::broadcast::Sender
             thread::sleep(poll_interval);
         }
     });
+}
+
+/// Detect sessions and enrich them with status and conversation data.
+/// `managed` contains sessions taken over by c9watch that should appear
+/// even if the process-based detector can't match them.
+pub fn detect_and_enrich_sessions_with_managed(
+    managed: &[crate::pty_writer::ManagedSessionInfo],
+) -> Result<Vec<Session>, String> {
+    let mut sessions = detect_and_enrich_sessions()?;
+
+    let detected_ids: HashSet<String> = sessions.iter().map(|s| s.id.clone()).collect();
+
+    let home_dir = dirs::home_dir().ok_or("Failed to get home directory")?;
+    let claude_projects_dir = home_dir.join(".claude").join("projects");
+    let custom_names = crate::session::CustomNames::load();
+    let custom_titles = crate::session::CustomTitles::load();
+
+    for info in managed {
+        if detected_ids.contains(&info.session_id) {
+            continue; // Already found by normal detection
+        }
+
+        // Find the session JSONL file across all project dirs
+        let entries_iter = match std::fs::read_dir(&claude_projects_dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        for dir_entry in entries_iter.flatten() {
+            let project_dir = dir_entry.path();
+            if !project_dir.is_dir() {
+                continue;
+            }
+            let session_file = project_dir.join(format!("{}.jsonl", info.session_id));
+            if !session_file.exists() {
+                continue;
+            }
+
+            let first_prompt = get_first_prompt_from_jsonl(&session_file)
+                .unwrap_or_else(|| "(Managed session)".to_string());
+            let message_count = count_messages_in_jsonl(&session_file);
+            if message_count == 0 {
+                break;
+            }
+
+            let modified = std::fs::metadata(&session_file)
+                .and_then(|m| m.modified())
+                .ok()
+                .map(|t| {
+                    let datetime: DateTime<Utc> = t.into();
+                    datetime.to_rfc3339()
+                })
+                .unwrap_or_default();
+
+            // Try to get summary from sessions-index.json
+            let index_path = project_dir.join("sessions-index.json");
+            let sessions_index = parse_sessions_index(&index_path).ok();
+            let session_entry = sessions_index.as_ref().and_then(|index| {
+                index
+                    .entries
+                    .iter()
+                    .find(|entry| entry.session_id == info.session_id)
+            });
+            let (summary, git_branch) = match session_entry {
+                Some(entry) => (entry.summary.clone(), Some(entry.git_branch.clone())),
+                None => (None, None),
+            };
+
+            let entries = parse_last_n_entries(&session_file, 20).unwrap_or_default();
+            let status = if entries.is_empty() {
+                SessionStatus::Connecting
+            } else {
+                determine_status(&entries)
+            };
+            let latest_message = get_latest_message_from_entries(&entries);
+            let pending_tool_name = get_pending_tool_name(&entries);
+
+            let project_path = session_entry
+                .map(|e| e.project_path.to_string_lossy().to_string())
+                .unwrap_or_else(|| {
+                    project_dir
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("unknown")
+                        .to_string()
+                });
+
+            let session_name = custom_names
+                .get(&info.session_id)
+                .cloned()
+                .unwrap_or_else(|| {
+                    project_dir
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("unknown")
+                        .rsplit('-')
+                        .next()
+                        .unwrap_or("unknown")
+                        .to_string()
+                });
+
+            let custom_title = custom_titles.get(&info.session_id).cloned();
+
+            sessions.push(Session {
+                id: info.session_id.clone(),
+                pid: info.pid,
+                session_name,
+                custom_title,
+                project_path,
+                git_branch,
+                first_prompt,
+                summary,
+                message_count,
+                modified,
+                status,
+                latest_message,
+                pending_tool_name,
+            });
+            break; // Found the session file, no need to check more dirs
+        }
+    }
+
+    Ok(sessions)
 }
 
 /// Detect sessions and enrich them with status and conversation data

@@ -10,9 +10,10 @@
 		onexpand?: () => void;
 		onstop?: () => void;
 		onopen?: () => void;
+		ontakeover?: () => void;
 	}
 
-	let { session, compact = false, onexpand, onstop, onopen }: Props = $props();
+	let { session, compact = false, onexpand, onstop, onopen, ontakeover }: Props = $props();
 
 	let needsAttention = $derived(
 		session.status === SessionStatus.NeedsPermission ||
@@ -103,6 +104,11 @@
 	function handleOpen(e: MouseEvent) {
 		e.stopPropagation();
 		onopen?.();
+	}
+
+	function handleTakeover(e: MouseEvent) {
+		e.stopPropagation();
+		ontakeover?.();
 	}
 
 	async function saveTitle() {
@@ -222,6 +228,12 @@
 			<!-- Bottom Actions -->
 			<div class="card-actions-container">
 				<div class="card-actions">
+					<button type="button" class="action-btn takeover" onclick={handleTakeover} title="Takeover">
+						<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+							<path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
+						</svg>
+						TAKEOVER
+					</button>
 					<button type="button" class="action-btn" onclick={(e) => startEditing(e)} title="Rename">
 						<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
 							<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
@@ -464,6 +476,11 @@
 	.action-btn.danger:hover {
 		color: var(--status-permission);
 		border-color: var(--status-permission);
+	}
+
+	.action-btn.takeover:hover {
+		color: var(--status-input);
+		border-color: var(--status-input);
 	}
 
 	.action-btn.primary {

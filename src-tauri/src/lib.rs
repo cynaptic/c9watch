@@ -4,7 +4,11 @@ pub mod actions;
 #[cfg(not(mobile))]
 pub mod auth;
 #[cfg(not(mobile))]
+pub mod bridge;
+#[cfg(not(mobile))]
 pub mod polling;
+#[cfg(not(mobile))]
+pub mod pty_writer;
 #[cfg(not(mobile))]
 pub mod web_server;
 
@@ -57,8 +61,11 @@ fn greet(name: &str) -> String {
 
 #[cfg(not(mobile))]
 #[tauri::command]
-async fn get_sessions() -> Result<Vec<Session>, String> {
-    polling::detect_and_enrich_sessions()
+async fn get_sessions(
+    session_map: tauri::State<'_, pty_writer::SessionMap>,
+) -> Result<Vec<Session>, String> {
+    let managed = pty_writer::get_managed_sessions(&session_map);
+    polling::detect_and_enrich_sessions_with_managed(&managed)
 }
 
 /// Core logic for getting conversation data (shared by Tauri command and WS handler)
@@ -162,6 +169,74 @@ async fn show_main_window(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(not(mobile))]
+#[tauri::command]
+async fn takeover_session(
+    session_map: tauri::State<'_, pty_writer::SessionMap>,
+    pid: u32,
+    session_id: String,
+    project_path: String,
+) -> Result<(), String> {
+    if pid > 0 {
+        // Best-effort kill — process may already be dead, that's fine
+        let _ = stop_session_action(pid);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let map = session_map.inner().clone();
+    let sid = session_id.clone();
+    let pp = project_path.clone();
+    tokio::task::spawn_blocking(move || pty_writer::take_over_session(&map, 0, &sid, &pp))
+        .await
+        .map_err(|e| format!("Task join error: {}", e))??;
+    Ok(())
+}
+
+#[cfg(not(mobile))]
+#[tauri::command]
+async fn is_session_managed(
+    session_map: tauri::State<'_, pty_writer::SessionMap>,
+    session_id: String,
+) -> Result<bool, String> {
+    Ok(pty_writer::is_managed(&session_map, &session_id))
+}
+
+#[cfg(not(mobile))]
+#[tauri::command]
+async fn send_input(
+    session_map: tauri::State<'_, pty_writer::SessionMap>,
+    sdk_bridge: tauri::State<'_, bridge::SdkBridgeHandle>,
+    session_id: String,
+    input: String,
+    project_path: String,
+    pid: u32,
+) -> Result<(), String> {
+    // On first send, kill the original claude process to avoid branch conflicts
+    if pid > 0 && !pty_writer::is_managed(&session_map, &session_id) {
+        let _ = stop_session_action(pid);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        // Register as managed so we don't kill again on subsequent sends
+        let map = session_map.inner().clone();
+        let sid = session_id.clone();
+        let pp = project_path.clone();
+        tokio::task::spawn_blocking(move || {
+            let _ = pty_writer::take_over_session(&map, 0, &sid, &pp);
+        })
+        .await
+        .map_err(|e| format!("Task join error: {}", e))?;
+    }
+
+    // Send via bridge — it auto-registers the session on first send
+    sdk_bridge.send_message(&session_id, &input, &project_path).await?;
+
+    // Touch the session file so polling picks up changes
+    let sid = session_id.clone();
+    tokio::task::spawn_blocking(move || {
+        pty_writer::touch_session_file(&sid);
+    });
+
+    Ok(())
+}
+
 /// Server connection info for the mobile client
 #[cfg(not(mobile))]
 #[derive(Debug, Clone, Serialize)]
@@ -213,6 +288,25 @@ pub fn run() {
 
             let (sessions_tx, _rx) = tokio::sync::broadcast::channel::<String>(16);
 
+            // ── Managed PTY sessions ──────────────────────────
+            let session_map = pty_writer::new_session_map();
+            app.manage(session_map.clone());
+
+            // ── SDK Bridge ────────────────────────────────────
+            let sdk_bridge = bridge::SdkBridge::new();
+            app.manage(sdk_bridge.clone());
+
+            // Forward bridge stream events to Tauri IPC
+            let app_handle = app.handle().clone();
+            let mut bridge_rx = sdk_bridge.subscribe();
+            tauri::async_runtime::spawn(async move {
+                while let Ok(event_json) = bridge_rx.recv().await {
+                    if app_handle.emit("stream-event", &event_json).is_err() {
+                        break;
+                    }
+                }
+            });
+
             let server_info = ServerInfo {
                 token: token.clone(),
                 port,
@@ -224,11 +318,13 @@ pub fn run() {
             let ws_state = Arc::new(web_server::WsState {
                 auth_token: token,
                 sessions_tx: sessions_tx.clone(),
+                session_map: session_map.clone(),
+                sdk_bridge: sdk_bridge.clone(),
             });
             tauri::async_runtime::spawn(web_server::start_server(ws_state));
 
             // ── Polling loop ────────────────────────────────────
-            start_polling(app.handle().clone(), sessions_tx);
+            start_polling(app.handle().clone(), sessions_tx, session_map);
 
             // ── Tray icon ───────────────────────────────────────
             let app_handle = app.handle().clone();
@@ -261,7 +357,10 @@ pub fn run() {
             open_session,
             rename_session,
             show_main_window,
-            get_server_info
+            get_server_info,
+            takeover_session,
+            send_input,
+            is_session_managed
         ]);
 
     // Mobile: minimal shell (all communication via WebSocket from the frontend)

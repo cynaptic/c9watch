@@ -4,6 +4,9 @@
 	import { quintOut } from 'svelte/easing';
 	import type { Session, Conversation } from '$lib/types';
 	import { SessionStatus } from '$lib/types';
+	import { isSessionManaged, takeoverSession, sendInput, getConversation, onStreamEvent, onStreamEnd } from '$lib/api';
+	import type { StreamEventPayload, StreamEndPayload } from '$lib/api';
+	import { currentConversation } from '$lib/stores/sessions';
 	import MessageBubble from './MessageBubble.svelte';
 	import MessageNavMap from './MessageNavMap.svelte';
 
@@ -17,6 +20,22 @@
 
 	let { session, conversation, onclose, onstop, onopen }: Props = $props();
 
+	let managed = $state(false);
+	let inputText = $state('');
+	let sending = $state(false);
+	let takingOver = $state(false);
+
+	// Streaming state
+	let streamText = $state('');
+	let streamTool = $state<string | null>(null);
+	let streamActive = $state(false);
+	let streamError = $state<string | null>(null);
+	let sentMessage = $state<string | null>(null);
+	let streamStartTime = $state<number>(0);
+	let elapsedSeconds = $state(0);
+	let elapsedTimer = $state<ReturnType<typeof setInterval> | null>(null);
+	let hasFirstContent = $state(false);
+
 	let messagesContainer = $state<HTMLDivElement>(undefined!);
 	let isInitialLoad = $state(true);
 	let hasScrolledToBottom = $state(false);
@@ -29,8 +48,66 @@
 		navSheetOpen = false;
 	}
 
+	function handleStreamChunk(e: StreamEventPayload) {
+		if (e.sessionId !== session.id) return;
+		const data = e.data;
+		if (!data) return;
+
+		if (!hasFirstContent) {
+			hasFirstContent = true;
+			// Stop the elapsed timer once content starts flowing
+			if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
+		}
+
+		// Claude stream-json format: each line is a JSON object with a "type" field
+		if (data.type === 'content_block_start') {
+			const block = data.content_block;
+			if (block?.type === 'tool_use') {
+				streamTool = block.name || 'tool';
+			}
+		} else if (data.type === 'content_block_delta') {
+			const delta = data.delta;
+			if (delta?.type === 'text_delta' && delta.text) {
+				streamText += delta.text;
+			}
+		} else if (data.type === 'content_block_stop') {
+			streamTool = null;
+		} else if (data.type === 'message_start' || data.type === 'message_delta') {
+			// Message-level events, no text to append
+		}
+	}
+
+	function handleStreamEnd(e: StreamEndPayload) {
+		if (e.sessionId !== session.id) return;
+		streamActive = false;
+		sending = false;
+		streamTool = null;
+		hasFirstContent = false;
+		if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
+		if (!e.success) {
+			streamError = e.error || 'Stream ended with error';
+		} else {
+			sentMessage = null;
+			streamText = '';
+			// Re-fetch conversation from JSONL to show the new messages
+			getConversation(session.id).then((conv) => {
+				currentConversation.set(conv);
+			}).catch((err) => {
+				console.error('Failed to refresh conversation:', err);
+			});
+		}
+	}
+
 	onMount(() => {
 		isInitialLoad = false;
+
+		isSessionManaged(session.id).then((m) => {
+			managed = m;
+		}).catch(() => {});
+
+		// Subscribe to stream events
+		const unsubEvent = onStreamEvent(handleStreamChunk);
+		const unsubEnd = onStreamEnd(handleStreamEnd);
 
 		const handleKeydown = (e: KeyboardEvent) => {
 			if (e.key === 'Escape') {
@@ -38,8 +115,63 @@
 			}
 		};
 		window.addEventListener('keydown', handleKeydown);
-		return () => window.removeEventListener('keydown', handleKeydown);
+		return () => {
+			window.removeEventListener('keydown', handleKeydown);
+			unsubEvent();
+			unsubEnd();
+			if (elapsedTimer) clearInterval(elapsedTimer);
+		};
 	});
+
+	async function handleTakeover() {
+		takingOver = true;
+		try {
+			await takeoverSession(session.pid, session.id, session.projectPath);
+			managed = true;
+		} catch (err) {
+			console.error('Takeover failed:', err);
+		} finally {
+			takingOver = false;
+		}
+	}
+
+	async function handleSendInput() {
+		const text = inputText.trim();
+		if (!text || sending) return;
+		sending = true;
+		streamText = '';
+		streamTool = null;
+		streamError = null;
+		streamActive = true;
+		sentMessage = text;
+		hasFirstContent = false;
+		inputText = '';
+
+		// Start elapsed timer
+		streamStartTime = Date.now();
+		elapsedSeconds = 0;
+		if (elapsedTimer) clearInterval(elapsedTimer);
+		elapsedTimer = setInterval(() => {
+			elapsedSeconds = Math.floor((Date.now() - streamStartTime) / 1000);
+		}, 1000);
+
+		try {
+			await sendInput(session.id, text, session.projectPath, session.pid);
+		} catch (err) {
+			console.error('Send input failed:', err);
+			streamActive = false;
+			streamError = String(err);
+			sending = false;
+			if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
+		}
+	}
+
+	function handleInputKeydown(e: KeyboardEvent) {
+		if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+			e.preventDefault();
+			handleSendInput();
+		}
+	}
 
 	function handleScroll() {
 		// No longer persisting scroll position as we want to always show latest on open
@@ -63,6 +195,15 @@
 					});
 				}
 			}
+		}
+	});
+
+	// Auto-scroll when sent message appears or streaming text updates
+	$effect(() => {
+		if ((sentMessage || streamText) && messagesContainer) {
+			tick().then(() => {
+				messagesContainer.scrollTop = messagesContainer.scrollHeight;
+			});
 		}
 	});
 
@@ -159,6 +300,19 @@
 					</div>
 				</div>
 				<div class="header-actions">
+					{#if !managed}
+						<button
+							type="button"
+							class="header-button takeover-btn"
+							onclick={handleTakeover}
+							disabled={takingOver}
+							title="Takeover Session"
+						>
+							<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+								<path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
+							</svg>
+						</button>
+					{/if}
 					<button type="button" class="header-button" onclick={() => onstop?.()} title="Stop Session">
 						<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
 							<rect x="6" y="6" width="12" height="12" rx="1" />
@@ -223,9 +377,83 @@
 								<MessageBubble {message} />
 							{/if}
 						{/each}
+
+						<!-- Inline streaming area (inside scroll) -->
+						{#if sentMessage}
+							<div class="stream-bubble user">
+								<div class="stream-header">
+									<span class="stream-icon">→</span>
+									<span class="stream-role">You</span>
+								</div>
+								<div class="stream-content">{sentMessage}</div>
+							</div>
+						{/if}
+						{#if streamActive || streamText || streamError}
+							<div class="stream-bubble assistant">
+								<div class="stream-header">
+									<span class="stream-icon">◆</span>
+									<span class="stream-role">Claude</span>
+									{#if streamActive && !hasFirstContent}
+										<span class="stream-elapsed">{elapsedSeconds}s</span>
+									{/if}
+								</div>
+								{#if streamActive && !hasFirstContent}
+									<div class="stream-waiting">
+										<div class="waiting-bar"></div>
+										<span class="waiting-label">
+											{#if elapsedSeconds < 3}
+												Starting session...
+											{:else if elapsedSeconds < 8}
+												Warming up...
+											{:else}
+												Thinking...
+											{/if}
+										</span>
+									</div>
+								{/if}
+								{#if streamTool}
+									<div class="stream-tool-indicator">
+										<span class="tool-spinner"></span>
+										Using {streamTool}...
+									</div>
+								{/if}
+								{#if streamText}
+									<div class="stream-content">{streamText}</div>
+								{/if}
+								{#if streamError}
+									<div class="stream-error">{streamError}</div>
+								{/if}
+							</div>
+						{/if}
 					</div>
 				{/if}
 			</div>
+
+			<!-- Input Bar (only after takeover) -->
+			{#if managed}
+				<div class="input-bar">
+					<textarea
+						class="input-textarea"
+						bind:value={inputText}
+						onkeydown={handleInputKeydown}
+						placeholder="Send a message... (Ctrl+Enter)"
+						rows="2"
+						disabled={sending}
+					></textarea>
+					<button
+						type="button"
+						class="send-btn"
+						onclick={handleSendInput}
+						disabled={!inputText.trim() || sending}
+						title="Send (Ctrl+Enter)"
+					>
+						<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+							<line x1="22" y1="2" x2="11" y2="13" />
+							<polygon points="22 2 15 22 11 13 2 9 22 2" />
+						</svg>
+					</button>
+				</div>
+			{/if}
 
 			<!-- Mobile: FAB to open nav sheet -->
 			<button
@@ -497,6 +725,209 @@
 		color: var(--text-muted);
 		text-transform: uppercase;
 		letter-spacing: 0.05em;
+	}
+
+	/* ── Streaming Area ───────────────────────────────────────── */
+	.stream-bubble {
+		margin: var(--space-sm) 0;
+		padding: var(--space-md) var(--space-lg);
+		max-width: 100%;
+		border-left: 1px solid var(--border-default);
+	}
+
+	.stream-bubble.user {
+		border-left: 2px solid var(--text-primary);
+		background: rgba(255, 255, 255, 0.01);
+	}
+
+	.stream-bubble.assistant {
+		border-left-color: var(--text-muted);
+	}
+
+	.stream-header {
+		display: flex;
+		align-items: center;
+		gap: var(--space-sm);
+		margin-bottom: var(--space-sm);
+	}
+
+	.stream-icon {
+		font-family: var(--font-mono);
+		font-size: 12px;
+		color: var(--text-muted);
+	}
+
+	.stream-role {
+		font-family: var(--font-mono);
+		font-weight: 500;
+		font-size: 12px;
+		color: var(--text-muted);
+		text-transform: uppercase;
+		letter-spacing: 0.1em;
+	}
+
+	.stream-bubble.user .stream-role {
+		color: var(--text-primary);
+	}
+
+	.stream-content {
+		color: var(--text-secondary);
+		font-size: 15px;
+		line-height: 1.6;
+		white-space: pre-wrap;
+		word-break: break-word;
+	}
+
+	.stream-bubble.user .stream-content {
+		color: var(--text-primary);
+	}
+
+	.stream-tool-indicator {
+		display: flex;
+		align-items: center;
+		gap: var(--space-sm);
+		color: var(--status-input);
+		font-size: 12px;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		margin-bottom: var(--space-sm);
+	}
+
+	.tool-spinner {
+		display: inline-block;
+		width: 10px;
+		height: 10px;
+		border: 2px solid var(--status-input);
+		border-top-color: transparent;
+		border-radius: 50%;
+		animation: spin 0.8s linear infinite;
+	}
+
+	@keyframes spin {
+		to { transform: rotate(360deg); }
+	}
+
+	.stream-elapsed {
+		margin-left: auto;
+		font-family: var(--font-mono);
+		font-size: 12px;
+		color: var(--text-muted);
+		letter-spacing: 0.05em;
+		opacity: 0.6;
+	}
+
+	.stream-waiting {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-sm);
+	}
+
+	.waiting-bar {
+		height: 2px;
+		width: 100%;
+		background: var(--border-default);
+		position: relative;
+		overflow: hidden;
+	}
+
+	.waiting-bar::after {
+		content: '';
+		position: absolute;
+		top: 0;
+		left: 0;
+		height: 100%;
+		width: 40%;
+		background: var(--text-muted);
+		animation: waiting-slide 1.5s ease-in-out infinite;
+	}
+
+	@keyframes waiting-slide {
+		0% { left: -40%; }
+		100% { left: 100%; }
+	}
+
+	.waiting-label {
+		font-family: var(--font-mono);
+		font-size: 12px;
+		color: var(--text-muted);
+		text-transform: uppercase;
+		letter-spacing: 0.1em;
+	}
+
+	.stream-error {
+		color: var(--accent-red);
+		margin-top: var(--space-sm);
+	}
+
+	/* ── Takeover Button ───────────────────────────────────────── */
+	.header-button.takeover-btn {
+		color: var(--status-input);
+	}
+
+	.header-button.takeover-btn:hover {
+		color: var(--text-primary);
+	}
+
+	.header-button.takeover-btn:disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
+	}
+
+	/* ── Input Bar ─────────────────────────────────────────────── */
+	.input-bar {
+		display: flex;
+		align-items: flex-end;
+		gap: var(--space-sm);
+		padding: var(--space-md) var(--space-xl);
+		border-top: 1px solid var(--border-default);
+		background: var(--bg-card);
+	}
+
+	.input-textarea {
+		flex: 1;
+		resize: none;
+		font-family: var(--font-mono);
+		font-size: 14px;
+		color: var(--text-primary);
+		background: var(--bg-base);
+		border: 1px solid var(--border-default);
+		padding: var(--space-sm) var(--space-md);
+		outline: none;
+		transition: border-color 0.2s ease;
+		min-height: 40px;
+		max-height: 120px;
+	}
+
+	.input-textarea:focus {
+		border-color: var(--status-input);
+	}
+
+	.input-textarea:disabled {
+		opacity: 0.5;
+	}
+
+	.send-btn {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 40px;
+		height: 40px;
+		background: var(--text-primary);
+		border: 1px solid var(--text-primary);
+		color: var(--bg-base);
+		cursor: pointer;
+		transition: all 0.2s ease;
+		flex-shrink: 0;
+	}
+
+	.send-btn:hover:not(:disabled) {
+		background: var(--text-secondary);
+		border-color: var(--text-secondary);
+	}
+
+	.send-btn:disabled {
+		opacity: 0.3;
+		cursor: not-allowed;
 	}
 
 	/* ── Mobile Responsive ─────────────────────────────────────── */
