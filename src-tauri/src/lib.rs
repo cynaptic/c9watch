@@ -148,6 +148,21 @@ async fn rename_session(
     Ok(())
 }
 
+/// Get the terminal title for a session (iTerm2 only, macOS)
+#[tauri::command]
+async fn get_terminal_title(pid: u32) -> Result<Option<String>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(actions::get_iterm2_session_title(pid))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pid;
+        Ok(None)
+    }
+}
+
+/// Show and focus the main application window
 #[cfg(not(mobile))]
 #[tauri::command]
 async fn show_main_window(app: AppHandle) -> Result<(), String> {
