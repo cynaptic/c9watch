@@ -91,6 +91,14 @@ class WsClient {
 			const msg = JSON.parse(event.data);
 
 			// Server push events → forward to event listeners
+			if (msg.type === 'streamEvent') {
+				this.emit('streamEvent', msg);
+				return;
+			}
+			if (msg.type === 'streamEnd') {
+				this.emit('streamEnd', msg);
+				return;
+			}
 			if (msg.type === 'sessionsUpdated') {
 				this.emit('sessionsUpdated', msg.data);
 				return;

@@ -1,0 +1,15 @@
+{
+  "name": "c9watch-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "bundle": "esbuild bridge.mjs --bundle --platform=node --target=node18 --outfile=../resources/bridge.cjs --format=cjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0"
+  }
+}

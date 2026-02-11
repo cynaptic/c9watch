@@ -32,11 +32,12 @@ dirs = "5.0"
 chrono = "0.4"
 libc = "0.2.180"
 axum = { version = "0.7", features = ["ws"] }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "process", "io-util"] }
 rand = "0.8"
 qr2term = "0.3"
 rust-embed = "8"
 mime_guess = "2"
+uuid = { version = "1", features = ["v4"] }
 
 [target."cfg(target_os = \"macos\")".dependencies]
 cocoa = "0.26"

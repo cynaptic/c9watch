@@ -107,9 +107,11 @@ impl<'de> Deserialize<'de> for UserMessage {
             Some(Value::String(s)) => (s.clone(), false),
             Some(Value::Array(arr)) => {
                 let mut parts = Vec::new();
+                let mut has_tool_result = false;
                 for item in arr {
                     match item.get("type").and_then(|t| t.as_str()) {
                         Some("tool_result") => {
+                            has_tool_result = true;
                             if let Some(content) = item.get("content") {
                                 match content {
                                     Value::String(s) => parts.push(s.clone()),
@@ -135,11 +137,15 @@ impl<'de> Deserialize<'de> for UserMessage {
                     }
                 }
                 let text = if parts.is_empty() {
-                    "[tool result]".to_string()
+                    if has_tool_result {
+                        "[tool result]".to_string()
+                    } else {
+                        String::new()
+                    }
                 } else {
                     parts.join("\n")
                 };
-                (text, true)
+                (text, has_tool_result)
             }
             _ => (String::new(), false),
         };

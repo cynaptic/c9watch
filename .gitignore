@@ -1,6 +1,7 @@
 .DS_Store
 node_modules
 /build
+/target/
 /.svelte-kit
 /package
 .env
@@ -11,8 +12,11 @@ vite.config.ts.timestamp-*
 Icon Exports/
 .worktrees/
 
+
 # Local development notes (not tracked)
 *.local.md
 
 # Claude Code instructions (not tracked)
 CLAUDE.md
+
+src-tauri/resources/bridge.cjs
